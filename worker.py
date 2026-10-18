@@ -14,6 +14,7 @@ Code gets only its own token. Known secret values are scrubbed from everything s
 Standard library only, so the container needs nothing beyond python3 and git.
 """
 
+import base64
 import collections
 import json
 import logging
@@ -36,7 +37,9 @@ SAZED_URL = os.environ.get("SAZED_URL", "http://192.168.50.155:8000").rstrip("/"
 WORKER_KEY = os.environ.get("SAZED_WORKER_KEY", "")
 CLAUDE_TOKEN = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
 AGENT_USER = os.environ.get("SAZED_AGENT_USER", "agent")
-AGENT_HOME = Path(pwd.getpwnam(AGENT_USER).pw_dir)
+_AGENT_PW = pwd.getpwnam(AGENT_USER)
+AGENT_HOME = Path(_AGENT_PW.pw_dir)
+AGENT_UID, AGENT_GID = _AGENT_PW.pw_uid, _AGENT_PW.pw_gid
 JOBS_DIR = AGENT_HOME / "jobs"
 AGY = str(AGENT_HOME / ".local/bin/agy")
 CLAUDE = str(AGENT_HOME / ".local/bin/claude")
@@ -52,9 +55,12 @@ log = logging.getLogger("sazed-worker")
 _stop = threading.Event()
 
 
+_extra_secrets: set[str] = set()  # per-job values to scrub too (e.g. a clone token)
+
+
 def _scrub(text: str) -> str:
     """Remove known secret values from anything leaving this process."""
-    for secret in (WORKER_KEY, CLAUDE_TOKEN):
+    for secret in (WORKER_KEY, CLAUDE_TOKEN, *_extra_secrets):
         if secret and len(secret) >= 12:
             text = text.replace(secret, "[redacted]")
     return text
@@ -143,6 +149,10 @@ _AGENT_SECRET_READS = ["Read(~/.claude/**)", "Read(~/.claude.json)", "Read(~/.ge
                        "Read(//proc/**)", "Read(//etc/sazed-eco/**)"]
 _CLAUDE_PROFILES: dict[str, tuple[str, list[str]]] = {
     "review": ("Read,Grep,Glob", ["Read", "Grep", "Glob"]),
+    # Edits only inside the job's working copy (cwd); no shell, so nothing runs and nothing
+    # is pushed. The worker turns the edits into a file list that the gateway commits as a PR.
+    "change": ("Read,Grep,Glob,Edit,Write",
+               ["Read", "Grep", "Glob", "Edit(./**)", "Write(./**)"]),
 }
 
 
@@ -342,12 +352,25 @@ class JobFailed(Exception):
     """A job that can't run (bad repo, clone failure, unsupported profile, bad input)."""
 
 
-def _git(*args: str, cwd: Path | None = None, timeout: int = 180) -> str:
-    """git as the agent user, with hooks disabled and no credential prompts."""
+def _git(*args: str, cwd: Path | None = None, timeout: int = 180,
+         token: str | None = None) -> str:
+    """git as the agent user, with hooks disabled and no credential prompts.
+
+    A token (read-only, one repo, from the gateway's GitHub App) goes in via environment config,
+    not argv, so it never shows in a process listing.
+    """
+    env = _agent_env("git")
+    if token:
+        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        env |= {
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
+            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+        }
     proc = subprocess.Popen(
         ["git", "-c", "core.hooksPath=/dev/null", *args],
         cwd=cwd,
-        env=_agent_env("git"),
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -371,28 +394,86 @@ def _workspace(job_id: str) -> Path:
     return path
 
 
-def _prepare_repo(job: dict[str, Any], workspace: Path) -> tuple[Path, str | None]:
-    """A checkout of the job's repo, and the session to resume (None if it can't be resumed)."""
+def _chown_tree(root: Path) -> None:
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in [*dirnames, *filenames]:
+            os.chown(Path(dirpath) / name, AGENT_UID, AGENT_GID, follow_symlinks=False)
+    os.chown(root, AGENT_UID, AGENT_GID)
+
+
+def _working_copy(repo_dir: Path, workspace: Path) -> Path:
+    """A plain copy of the checkout without .git: the agent can't reach git internals or hooks."""
+    work = workspace / "work"
+    if not work.exists():
+        shutil.copytree(repo_dir, work, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+        _chown_tree(work)
+    return work
+
+
+def _prepare_repo(job: dict[str, Any], workspace: Path) -> tuple[Path, Path, str | None]:
+    """(checkout, agent cwd, session to resume). Change jobs get a working copy as cwd."""
+    change = job["profile"] == "change"
     resume = job.get("resume_session_id")
     if resume and job.get("parent_id"):
-        parent_repo = JOBS_DIR / str(uuid.UUID(str(job["parent_id"]))) / "repo"
+        parent_ws = JOBS_DIR / str(uuid.UUID(str(job["parent_id"])))
+        parent_repo = parent_ws / "repo"
         if parent_repo.is_dir():
-            os.utime(parent_repo.parent)  # keep an active session's workspace from aging out
-            return parent_repo, resume
+            os.utime(parent_ws)  # keep an active session's workspace from aging out
+            cwd = _working_copy(parent_repo, parent_ws) if change else parent_repo
+            return parent_repo, cwd, resume
     repo = (job.get("params") or {}).get("repo") or ""
     if not _REPO_RE.match(repo):
         raise JobFailed(f"invalid repo '{repo}'")
     dest, tmp = workspace / "repo", workspace / "repo.tmp"
     shutil.rmtree(tmp, ignore_errors=True)
-    # Public repos clone anonymously; private ones need the GitHub App (plans/07 phase 3b).
+    # Public repos clone anonymously; private ones with a read-only token Sazed got from the
+    # gateway's GitHub App for this job.
+    token = job.get("clone_token") or None
+    if token:
+        _extra_secrets.add(token)
     try:
         _git("clone", "--depth", "50", "--single-branch", f"https://github.com/{repo}.git",
-             str(tmp))
+             str(tmp), token=token)
     except JobFailed:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
     tmp.rename(dest)
-    return dest, None  # a fresh checkout has no session to resume
+    cwd = _working_copy(dest, workspace) if change else dest
+    return dest, cwd, None  # a fresh checkout has no session to resume
+
+
+_MAX_CHANGED_FILES = 200
+_MAX_CHANGED_BYTES = 5 * 1024 * 1024
+
+
+def _changed_files(repo_dir: Path, work: Path) -> dict[str, str | None]:
+    """Files the agent changed: path -> new content (base64), or None if deleted. Symlinks skip."""
+
+    def files(root: Path) -> dict[str, Path]:
+        out = {}
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if d != ".git"]
+            for name in filenames:
+                path = Path(dirpath) / name
+                if not path.is_symlink():
+                    out[path.relative_to(root).as_posix()] = path
+        return out
+
+    before, after = files(repo_dir), files(work)
+    changes: dict[str, str | None] = {}
+    total = 0
+    for rel in sorted(before.keys() | after.keys()):
+        if rel not in after:
+            changes[rel] = None
+            continue
+        data = after[rel].read_bytes()
+        if rel in before and before[rel].read_bytes() == data:
+            continue
+        total += len(data)
+        changes[rel] = base64.b64encode(data).decode()
+    if len(changes) > _MAX_CHANGED_FILES or total > _MAX_CHANGED_BYTES:
+        raise JobFailed(f"too many changes for one PR ({len(changes)} files, {total} bytes)")
+    return changes
 
 
 _EMPTY_RETRY_PROMPT = (
@@ -405,6 +486,7 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
     """Run one job to completion and return the finish payload for Sazed."""
     workspace = _workspace(job["id"])
     run = Run(job)
+    changes: dict[str, str | None] = {}
 
     if job["agent"] == "agy":
         resume = job.get("resume_session_id")
@@ -424,11 +506,13 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
     elif job["agent"] == "claude":
         if job["profile"] not in _CLAUDE_PROFILES:
             return {"status": "failed", "error": f"profile '{job['profile']}' is not supported yet"}
-        cwd, resume = _prepare_repo(job, workspace)
+        repo_dir, cwd, resume = _prepare_repo(job, workspace)
         prompt = job["prompt"]
         if job.get("resume_session_id") and not resume:
             prompt = f"(The earlier session could not be resumed; start fresh.)\n\n{prompt}"
         code = run.run(_claude_command(job, prompt, resume), cwd)
+        if job["profile"] == "change" and (run.result or {}).get("ok"):
+            changes = _changed_files(repo_dir, cwd)
     else:
         return {"status": "failed", "error": f"agent '{job['agent']}' is not supported"}
 
@@ -453,7 +537,11 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         return base | partial | {"status": "failed",
                                  "error": f"stopped at the {run.max_tools}-tool-call cap"}
     if result.get("ok") and response:
-        return base | {"status": "succeeded", "result": response}
+        out = base | {"status": "succeeded", "result": response}
+        if job.get("profile") == "change":
+            out["changes"] = changes
+            meta["changed_files"] = sorted(changes)
+        return out
     error = (
         result.get("error") or run.stderr.strip()[-1000:] or f"agent exited {code} with no answer"
     )
@@ -519,6 +607,7 @@ def main() -> None:
             log.exception("job %s crashed", job.get("id"))
             payload = {"status": "failed", "error": f"worker error: {type(e).__name__}: {e}"}
         _finish(str(job.get("id")), payload)
+        _extra_secrets.clear()
 
 
 if __name__ == "__main__":
