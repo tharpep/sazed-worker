@@ -1,0 +1,6 @@
+# Lint rules for this repo (also used by the worker pre-check and CI).
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "I", "UP", "B"]

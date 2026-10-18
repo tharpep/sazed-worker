@@ -1,0 +1,38 @@
+# Checks for pull requests (plans/07): runs on GitHub-hosted runners, never the homelab's
+# self-hosted ones, with a read-only token and no secrets. Sazed's CI watcher reads the result
+# and has the worker fix failing bot PRs. The bot can't edit this directory, so it can't change
+# its own checks (keep check logic inline here, not in scripts it could edit).
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: pip install ruff==0.17.1
+
+      - name: Python compiles
+        run: python -m compileall -q worker.py
+
+      - name: Lint (whole repo, ruff.toml)
+        run: ruff check --output-format=github .

@@ -16,6 +16,7 @@ Standard library only, so the container needs nothing beyond python3 and git.
 
 import base64
 import collections
+import difflib
 import json
 import logging
 import os
@@ -43,6 +44,7 @@ AGENT_UID, AGENT_GID = _AGENT_PW.pw_uid, _AGENT_PW.pw_gid
 JOBS_DIR = AGENT_HOME / "jobs"
 AGY = str(AGENT_HOME / ".local/bin/agy")
 CLAUDE = str(AGENT_HOME / ".local/bin/claude")
+RUFF = "/usr/local/bin/ruff"  # lint pre-check for change jobs (run by the worker, not the agent)
 POLL_SECONDS = 5
 FLUSH_SECONDS = 2
 MAX_PENDING_EVENTS = 2000
@@ -484,6 +486,69 @@ def _changed_files(repo_dir: Path, work: Path) -> dict[str, str | None]:
     return changes
 
 
+def _changed_lines(before: bytes | None, after: bytes) -> set[int]:
+    """1-based line numbers in `after` that are new or edited relative to `before`."""
+    old = (before or b"").decode(errors="replace").splitlines()
+    new = after.decode(errors="replace").splitlines()
+    lines: set[int] = set()
+    for tag, _i1, _i2, j1, j2 in difflib.SequenceMatcher(None, old, new).get_opcodes():
+        if tag in ("replace", "insert"):
+            lines.update(range(j1 + 1, j2 + 1))
+    return lines
+
+
+def _lint_changed(repo_dir: Path, work: Path, changes: dict[str, str | None]) -> list[str]:
+    """Ruff findings on lines the agent changed, using the repo's own ruff config.
+
+    Run by the worker with fixed arguments (as the agent user), so the agent never needs a shell.
+    Old code isn't held to the rules, only the agent's own lines.
+    """
+    py = [path for path, content in changes.items() if content is not None and path.endswith(".py")]
+    if not py or not Path(RUFF).exists():
+        return []
+    proc = subprocess.Popen(
+        [RUFF, "check", "--output-format=json", "--no-cache", "--quiet", "--exit-zero", *py],
+        cwd=work,
+        env=_agent_env("ruff"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+        **_as_agent(),
+    )
+    try:
+        out, _ = proc.communicate(timeout=60)
+        findings = json.loads(out or "[]")
+    except (subprocess.TimeoutExpired, json.JSONDecodeError):
+        _kill_group(proc)
+        return []
+    issues = []
+    touched: dict[str, set[int]] = {}
+    for f in findings if isinstance(findings, list) else []:
+        try:
+            rel = Path(f["filename"]).resolve().relative_to(work.resolve()).as_posix()
+            row = int(f["location"]["row"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if rel not in touched:
+            before = repo_dir / rel
+            touched[rel] = _changed_lines(
+                before.read_bytes() if before.is_file() else None, (work / rel).read_bytes()
+            )
+        if row in touched[rel]:
+            issues.append(f"{rel}:{row}: {f.get('code')} {f.get('message')}")
+    return issues[:40]
+
+
+def _lint_prompt(issues: list[str]) -> str:
+    return (
+        "The repo's linter (ruff, with its own config) flagged these problems on lines you "
+        "changed:\n" + "\n".join(f"- {i}" for i in issues) + "\n\nFix them, touching only what "
+        "is needed. Then reply with the complete PR description again (updated if anything "
+        "changed), in the same format as before."
+    )
+
+
 _EMPTY_RETRY_PROMPT = (
     "Some tools you tried are not available here. Using only what you have already found, "
     "answer the original question now in the requested format, with sources."
@@ -495,6 +560,7 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
     workspace = _workspace(job["id"])
     run = Run(job)
     changes: dict[str, str | None] = {}
+    lint_meta: dict[str, Any] = {}
 
     if job["agent"] == "agy":
         resume = job.get("resume_session_id")
@@ -521,12 +587,25 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         code = run.run(_claude_command(job, prompt, resume), cwd)
         if job["profile"] == "change" and (run.result or {}).get("ok"):
             changes = _changed_files(repo_dir, cwd)
+            issues = _lint_changed(repo_dir, cwd, changes)
+            lint_meta = {"lint_found": len(issues)}
+            if issues and not run.stop_reason and run.session_id:
+                log.info("job %s: %d lint issue(s) on changed lines, one fix round", job["id"],
+                         len(issues))
+                first = run.result
+                run.result = None
+                code = run.run(_claude_command(job, _lint_prompt(issues), run.session_id), cwd)
+                if (run.result or {}).get("ok"):
+                    changes = _changed_files(repo_dir, cwd)
+                else:
+                    run.result = first  # keep the original answer if the fix round failed
+                lint_meta["lint_left"] = _lint_changed(repo_dir, cwd, changes)
     else:
         return {"status": "failed", "error": f"agent '{job['agent']}' is not supported"}
 
     result = run.result or {}
     response = result.get("response") or ""
-    meta = {
+    meta = lint_meta | {
         "tool_calls": run.tool_calls,
         "tools_used": run.tools_used,
         "usage": result.get("usage"),
