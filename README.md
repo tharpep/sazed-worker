@@ -1,6 +1,6 @@
 # sazed-worker
 
-Runs agent jobs for [Sazed](https://github.com/tharpep/sazed) on an isolated homelab container (CT 110). Research and second opinions run on Antigravity (`agy`, Gemini with Google Search grounding); read-only code reviews of public repos run on Claude Code. PR-only code changes come next.
+Runs agent jobs for [Sazed](https://github.com/tharpep/sazed) on an isolated homelab container (CT 110). Research and second opinions run on Antigravity (`agy`, Gemini with Google Search grounding). Code reviews and PR-only code changes run on Claude Code.
 
 Sazed owns the job queue, the prompts, the model allowlist, the daily caps and the approval gate. This service only:
 - claims a job,
@@ -20,6 +20,11 @@ It runs one job at a time and uses only the Python standard library.
   - It refuses reads of the agent's own logins and `/proc`.
   - `--setting-sources=user` ignores a repo's `.claude/settings.json` hooks.
 - **Unit gotcha:** no explicit `User=root` in the unit. With `NoNewPrivileges=yes`, systemd then drops CAP_SETUID and the privilege drop fails.
+- **Change profile:**
+  - The agent edits a copy of the checkout with no `.git` folder, using `--tools=Read,Grep,Glob,Edit,Write` and edits limited to the working copy (`Edit(./**)`, `Write(./**)`). No shell.
+  - The worker then sends the changed files (path to base64, or null for a deletion) in the finish payload.
+  - The gateway's GitHub App commits them on `sazed/<job-id>` and opens the PR. Nothing here can push.
+- **Private repos:** they clone with a read-only, single-repo token that Sazed gets from the gateway for the job. git reads it through a credential helper that takes it from the environment, so it never appears in argv or `.git/config`. (An `http.extraheader` with Basic auth didn't work with GitHub's newer long tokens.)
 - **Hard limits per job:** a wall-clock timeout and a cap on tool calls. The worker kills the agent's whole process group past either one.
 - **Empty answers:** agy can end empty when its last step was a tool that headless mode refused. The worker then resumes the same conversation once and asks for an answer from what it already found.
 - **Workspaces:** `~/jobs/<job-id>`, kept 14 days so follow-up jobs can resume a session.

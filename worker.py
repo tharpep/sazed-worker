@@ -352,6 +352,11 @@ class JobFailed(Exception):
     """A job that can't run (bad repo, clone failure, unsupported profile, bad input)."""
 
 
+_CREDENTIAL_HELPER = (
+    '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
+)
+
+
 def _git(*args: str, cwd: Path | None = None, timeout: int = 180,
          token: str | None = None) -> str:
     """git as the agent user, with hooks disabled and no credential prompts.
@@ -361,11 +366,14 @@ def _git(*args: str, cwd: Path | None = None, timeout: int = 180,
     """
     env = _agent_env("git")
     if token:
-        basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+        # A credential helper reading the token from the environment. (An http.extraheader with
+        # Basic auth was ignored for GitHub's newer long installation tokens.) Nothing is written
+        # to .git/config.
         env |= {
+            "GIT_TOKEN": token,
             "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": "http.https://github.com/.extraheader",
-            "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}",
+            "GIT_CONFIG_KEY_0": "credential.https://github.com.helper",
+            "GIT_CONFIG_VALUE_0": _CREDENTIAL_HELPER,
         }
     proc = subprocess.Popen(
         ["git", "-c", "core.hooksPath=/dev/null", *args],
