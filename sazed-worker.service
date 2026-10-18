@@ -1,0 +1,28 @@
+[Unit]
+Description=sazed-worker: agent jobs for Sazed (plans/07)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=worker
+Group=worker
+WorkingDirectory=/home/worker
+Environment=HOME=/home/worker
+Environment=PATH=/home/worker/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=SAZED_URL=http://192.168.50.155:8000
+# SAZED_WORKER_KEY and CLAUDE_CODE_OAUTH_TOKEN (root-only file; set with scripts/set-secret.sh)
+EnvironmentFile=/etc/sazed-eco/sazed-worker.env
+ExecStart=/usr/bin/python3 /opt/sazed-worker/worker.py
+Restart=always
+RestartSec=10
+# Let a running job finish its kill/flush before systemd forces it.
+TimeoutStopSec=30
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+
+[Install]
+WantedBy=multi-user.target
