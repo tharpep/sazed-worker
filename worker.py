@@ -49,6 +49,7 @@ POLL_SECONDS = 5
 FLUSH_SECONDS = 2
 MAX_PENDING_EVENTS = 2000
 WORKSPACE_KEEP_DAYS = 14
+DEADLINE_GRACE_S = 30  # extra seconds past the job timeout before the watchdog kills the agent
 _REPO_RE = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
 _SAFE_ARG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 
@@ -272,7 +273,9 @@ class Run:
 
     def run(self, cmd: list[str], cwd: Path) -> int:
         handle = self._handle_claude if self.job["agent"] == "claude" else self._handle_agy
-        self.deadline = time.monotonic() + self.timeout_s + 30  # fresh budget per process
+        self.deadline = (
+            time.monotonic() + self.timeout_s + DEADLINE_GRACE_S
+        )  # fresh budget per process
         proc = subprocess.Popen(
             cmd,
             cwd=cwd,
