@@ -4,25 +4,28 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=worker
-Group=worker
-WorkingDirectory=/home/worker
-Environment=HOME=/home/worker
-Environment=PATH=/home/worker/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Runs as root (the default) only so it can start agents as the unprivileged `agent` user; agents
+# then can't read this process's environment (worker key, Claude token) or /etc/sazed-eco.
+# Don't add an explicit User=root: with NoNewPrivileges=yes, systemd then drops CAP_SETUID and the
+# worker can't switch to the agent user (Popen fails with EPERM).
+WorkingDirectory=/home/agent
 Environment=SAZED_URL=http://192.168.50.155:8000
+Environment=SAZED_AGENT_USER=agent
 # SAZED_WORKER_KEY and CLAUDE_CODE_OAUTH_TOKEN (root-only file; set with scripts/set-secret.sh)
 EnvironmentFile=/etc/sazed-eco/sazed-worker.env
 ExecStart=/usr/bin/python3 /opt/sazed-worker/worker.py
 Restart=always
 RestartSec=10
-# Let a running job finish its kill/flush before systemd forces it.
-TimeoutStopSec=30
+# A stop cancels the running job; give it time to kill the agent and post the result.
+TimeoutStopSec=45
 NoNewPrivileges=yes
 PrivateTmp=yes
-ProtectSystem=full
+ProtectSystem=strict
+ReadWritePaths=/home/agent
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
+CapabilityBoundingSet=CAP_SETUID CAP_SETGID CAP_KILL CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
 
 [Install]
 WantedBy=multi-user.target

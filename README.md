@@ -1,6 +1,6 @@
 # sazed-worker
 
-Runs agent jobs for [Sazed](https://github.com/tharpep/sazed) on an isolated homelab container (CT 110). Today that means research with Antigravity (`agy`, Gemini with Google Search grounding); Claude Code tasks come next.
+Runs agent jobs for [Sazed](https://github.com/tharpep/sazed) on an isolated homelab container (CT 110). Research and second opinions run on Antigravity (`agy`, Gemini with Google Search grounding); read-only code reviews of public repos run on Claude Code. PR-only code changes come next.
 
 Sazed owns the job queue, the prompts, the model allowlist, the daily caps and the approval gate. This service only:
 - claims a job,
@@ -12,10 +12,14 @@ It runs one job at a time and uses only the Python standard library.
 
 ## How it runs
 
-- `worker.py` runs as the unprivileged `worker` user under systemd (`sazed-worker.service`).
-- **Secrets:** `SAZED_WORKER_KEY` and `CLAUDE_CODE_OAUTH_TOKEN` live in the root-only `/etc/sazed-eco/sazed-worker.env`.
-  - Agent processes get a minimal environment. agy never sees either secret.
-  - Claude Code will get only its own token.
+- **Users:** `worker.py` runs as root under systemd (`sazed-worker.service`), but only so it can start every agent, and every git command, as the unprivileged `agent` user. The CLIs and their logins live in `/home/agent`.
+- **Why a separate user:** an agent can't read the worker's `/proc/<pid>/environ` (worker key, Claude token) or the root-only `/etc/sazed-eco/sazed-worker.env`. A same-user agent could, as a Claude Code review of this repo pointed out.
+- **Agent environment:** minimal. Claude Code gets only its own token.
+- **Scrubbing:** known secret values are removed from everything posted to Sazed.
+- **Review profile:** `--tools=Read,Grep,Glob` only (no Bash: even git diff can write files with `--output=`).
+  - It refuses reads of the agent's own logins and `/proc`.
+  - `--setting-sources=user` ignores a repo's `.claude/settings.json` hooks.
+- **Unit gotcha:** no explicit `User=root` in the unit. With `NoNewPrivileges=yes`, systemd then drops CAP_SETUID and the privilege drop fails.
 - **Hard limits per job:** a wall-clock timeout and a cap on tool calls. The worker kills the agent's whole process group past either one.
 - **Empty answers:** agy can end empty when its last step was a tool that headless mode refused. The worker then resumes the same conversation once and asks for an answer from what it already found.
 - **Workspaces:** `~/jobs/<job-id>`, kept 14 days so follow-up jobs can resume a session.

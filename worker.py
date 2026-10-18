@@ -4,15 +4,21 @@ Loop: claim a job from Sazed, run the agent CLI in a fresh workspace, stream its
 (which doubles as the heartbeat and the cancel check), then post the result. One job at a time.
 
 Deliberately dumb: Sazed decides the prompt, model, limits and who may start what. The worker
-only enforces the hard limits it's handed (timeout, tool-call cap, which tools exist) and keeps
-its own secrets (the worker key, the Claude token) out of agent processes that don't need them.
+only enforces the hard limits it's handed (timeout, tool-call cap, which tools exist).
+
+Isolation: this process runs as root only so it can start agents as the unprivileged `agent`
+user. Agents therefore can't read this process's environment (/proc/<pid>/environ holds the
+worker key and the Claude token) or /etc/sazed-eco. Each agent gets a minimal environment; Claude
+Code gets only its own token. Known secret values are scrubbed from everything sent to Sazed.
 
 Standard library only, so the container needs nothing beyond python3 and git.
 """
 
+import collections
 import json
 import logging
 import os
+import pwd
 import re
 import shutil
 import signal
@@ -22,32 +28,46 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
 SAZED_URL = os.environ.get("SAZED_URL", "http://192.168.50.155:8000").rstrip("/")
 WORKER_KEY = os.environ.get("SAZED_WORKER_KEY", "")
-HOME = Path(os.environ.get("HOME", "/home/worker"))
-JOBS_DIR = HOME / "jobs"
-AGY = str(HOME / ".local/bin/agy")
-CLAUDE = str(HOME / ".local/bin/claude")
+CLAUDE_TOKEN = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+AGENT_USER = os.environ.get("SAZED_AGENT_USER", "agent")
+AGENT_HOME = Path(pwd.getpwnam(AGENT_USER).pw_dir)
+JOBS_DIR = AGENT_HOME / "jobs"
+AGY = str(AGENT_HOME / ".local/bin/agy")
+CLAUDE = str(AGENT_HOME / ".local/bin/claude")
 POLL_SECONDS = 5
 FLUSH_SECONDS = 2
+MAX_PENDING_EVENTS = 2000
 WORKSPACE_KEEP_DAYS = 14
 _REPO_RE = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
+_SAFE_ARG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("sazed-worker")
 _stop = threading.Event()
 
 
+def _scrub(text: str) -> str:
+    """Remove known secret values from anything leaving this process."""
+    for secret in (WORKER_KEY, CLAUDE_TOKEN):
+        if secret and len(secret) >= 12:
+            text = text.replace(secret, "[redacted]")
+    return text
+
+
 # ---------------------------------------------------------------- Sazed API
 
 
 def _post(path: str, body: dict[str, Any], timeout: float = 30) -> tuple[int, Any]:
+    """POST to Sazed. Never raises: network or decode failures come back as status 0."""
     req = urllib.request.Request(
         f"{SAZED_URL}{path}",
-        data=json.dumps(body).encode(),
+        data=_scrub(json.dumps(body)).encode(),
         headers={"Content-Type": "application/json", "X-Worker-Key": WORKER_KEY},
         method="POST",
     )
@@ -57,13 +77,15 @@ def _post(path: str, body: dict[str, Any], timeout: float = 30) -> tuple[int, An
             return resp.status, json.loads(raw) if raw else None
     except urllib.error.HTTPError as e:
         return e.code, e.read().decode(errors="replace")[:500]
+    except (OSError, ValueError) as e:  # URLError, timeouts, resets, bad JSON
+        return 0, f"{type(e).__name__}: {e}"
 
 
 def _agents() -> list[str]:
     agents = []
     if Path(AGY).exists():
         agents.append("agy")
-    if Path(CLAUDE).exists() and os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+    if Path(CLAUDE).exists() and CLAUDE_TOKEN:
         agents.append("claude")
     return agents
 
@@ -72,43 +94,55 @@ def _agents() -> list[str]:
 
 
 def _agent_env(agent: str) -> dict[str, str]:
-    """A minimal environment: no worker key, and the Claude token only for Claude Code."""
-    env = {k: os.environ[k] for k in ("PATH", "LANG", "LC_ALL", "TZ") if k in os.environ}
-    env["HOME"] = str(HOME)
+    """A minimal environment for an agent process (no worker key; Claude gets its own token)."""
+    env = {
+        "HOME": str(AGENT_HOME),
+        "USER": AGENT_USER,
+        "PATH": f"{AGENT_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "GIT_TERMINAL_PROMPT": "0",
+    }
     if agent == "claude":
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = CLAUDE_TOKEN
         env["DISABLE_AUTOUPDATER"] = "1"
     return env
+
+
+def _as_agent() -> dict[str, Any]:
+    """Popen kwargs that run the child as the unprivileged agent user."""
+    return {"user": AGENT_USER, "group": AGENT_USER, "extra_groups": []}
+
+
+def _safe_arg(value: str, what: str) -> str:
+    """Values that go into argv as their own arguments (model, effort, session ids)."""
+    if not _SAFE_ARG_RE.match(value):
+        raise JobFailed(f"invalid {what} '{value}'")
+    return value
 
 
 def _agy_command(job: dict[str, Any], prompt: str, resume: str | None) -> list[str]:
     params = job.get("params") or {}
     cmd = [
         AGY,
-        "-p",
-        prompt,
-        "--output-format",
-        "stream-json",
-        "--model",
-        job["model"],
-        "--print-timeout",
-        f"{int(params.get('timeout_s', 300))}s",
+        f"--prompt={prompt}",
+        "--output-format=stream-json",
+        f"--model={_safe_arg(job['model'], 'model')}",
+        f"--print-timeout={int(params.get('timeout_s', 300))}s",
     ]
     if params.get("effort"):
-        cmd += ["--effort", str(params["effort"])]
+        cmd.append(f"--effort={_safe_arg(str(params['effort']), 'effort')}")
     if resume:
-        cmd += ["--conversation", resume]
+        cmd.append(f"--conversation={_safe_arg(resume, 'session id')}")
     return cmd
 
 
-# Which built-in tools exist per profile (--tools), and which are pre-approved
-# (--allowedTools). With --permission-mode dontAsk anything not pre-approved is refused.
+# Which built-in tools exist per profile (--tools), which are pre-approved (--allowedTools),
+# and which reads are refused outright. With --permission-mode dontAsk anything not pre-approved
+# is refused. No Bash: even "read-only" git commands can write files (git diff --output=).
+_AGENT_SECRET_READS = ["Read(~/.claude/**)", "Read(~/.claude.json)", "Read(~/.gemini/**)",
+                       "Read(//proc/**)", "Read(//etc/sazed-eco/**)"]
 _CLAUDE_PROFILES: dict[str, tuple[str, list[str]]] = {
-    "review": (
-        "Read,Grep,Glob,Bash",
-        ["Read", "Grep", "Glob", "Bash(git log:*)", "Bash(git diff:*)", "Bash(git show:*)",
-         "Bash(git blame:*)"],
-    ),
+    "review": ("Read,Grep,Glob", ["Read", "Grep", "Glob"]),
 }
 
 
@@ -116,27 +150,24 @@ def _claude_command(job: dict[str, Any], prompt: str, resume: str | None) -> lis
     tools, allowed = _CLAUDE_PROFILES[job["profile"]]
     cmd = [
         CLAUDE,
-        "-p",
-        prompt,
-        "--output-format",
-        "stream-json",
+        "--print",
+        "--output-format=stream-json",
         "--verbose",  # required for stream-json in print mode
-        "--model",
-        job["model"],
-        "--permission-mode",
-        "dontAsk",
-        # Only the worker's own user settings: a repo's .claude/settings.json (hooks!) is ignored.
-        "--setting-sources",
-        "user",
+        f"--model={_safe_arg(job['model'], 'model')}",
+        "--permission-mode=dontAsk",
+        # Only the agent user's own settings: a repo's .claude/settings.json (hooks!) is ignored.
+        "--setting-sources=user",
         "--strict-mcp-config",
-        "--tools",
-        tools,
+        f"--tools={tools}",
         "--allowedTools",
         *allowed,
+        "--disallowedTools",
+        *_AGENT_SECRET_READS,
     ]
     if resume:
-        cmd += ["--resume", resume]
-    return cmd
+        cmd.append(f"--resume={_safe_arg(resume, 'session id')}")
+    # The prompt goes last, after "--", so it can never be read as an option.
+    return [*cmd, "--", prompt]
 
 
 # ---------------------------------------------------------------- one agent process
@@ -148,45 +179,58 @@ class Run:
     def __init__(self, job: dict[str, Any]):
         self.job = job
         params = job.get("params") or {}
-        self.deadline = time.monotonic() + int(params.get("timeout_s", 300)) + 30
+        self.timeout_s = int(params.get("timeout_s", 300))
         self.max_tools = int(params.get("max_tool_calls", 40))
+        self.deadline = 0.0
         self.tool_calls = 0
         self.tools_used: list[str] = []
         self.result: dict[str, Any] | None = None  # normalized: response, ok, error, usage, ...
         self.session_id: str | None = None
-        self.stop_reason: str | None = None  # cancelled | timed_out | tool_cap
+        self.stop_reason: str | None = None  # cancelled | timed_out | tool_cap | shutdown
         self.stderr = ""
         self._pending: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
         self._last_flush = time.monotonic()
 
     def _flush(self, force: bool = False) -> None:
-        if not force and time.monotonic() - self._last_flush < FLUSH_SECONDS:
-            return
-        events, self._pending = self._pending, []
-        self._last_flush = time.monotonic()
+        with self._lock:
+            if not force and time.monotonic() - self._last_flush < FLUSH_SECONDS:
+                return
+            events, self._pending = self._pending, []
+            self._last_flush = time.monotonic()
         status, body = _post(f"/worker/jobs/{self.job['id']}/events", {"events": events})
-        if status == 200 and isinstance(body, dict) and body.get("cancel"):
-            self.stop_reason = self.stop_reason or "cancelled"
-        elif status != 200:
-            log.warning("events post failed (%s): %s", status, body)
+        if status == 200:
+            if isinstance(body, dict) and body.get("cancel"):
+                self.stop_reason = self.stop_reason or "cancelled"
+            return
+        log.warning("events post failed (%s): %s", status, body)
+        with self._lock:  # keep the batch for the next try, within reason
+            self._pending = (events + self._pending)[-MAX_PENDING_EVENTS:]
+
+    def _queue(self, event: dict[str, Any]) -> None:
+        with self._lock:
+            self._pending.append(event)
+            if len(self._pending) > MAX_PENDING_EVENTS:
+                self._pending = self._pending[-MAX_PENDING_EVENTS:]
 
     def _count_tool(self, name: str) -> None:
         self.tool_calls += 1
         self.tools_used.append(name)
-        if self.tool_calls > self.max_tools:
-            self.stop_reason = "tool_cap"
+        if self.tool_calls >= self.max_tools:
+            self.stop_reason = self.stop_reason or "tool_cap"
 
     def _handle_agy(self, event: dict[str, Any]) -> None:
-        if "conversation_id" in event:
+        if isinstance(event.get("conversation_id"), str):
             self.session_id = event["conversation_id"]
-        step = event.get("step_update") or {}
-        if step.get("step_type") == "tool" and step.get("state") == "DONE":
-            self._count_tool(step.get("tool_name") or "?")
-        if event.get("event") == "result":
-            r = event.get("result") or {}
+        step = event.get("step_update")
+        done_tool = isinstance(step, dict) and step.get("step_type") == "tool"
+        if done_tool and step.get("state") == "DONE":
+            self._count_tool(str(step.get("tool_name") or "?"))
+        if event.get("event") == "result" and isinstance(event.get("result"), dict):
+            r = event["result"]
             self.session_id = r.get("conversation_id") or self.session_id
             self.result = {
-                "response": (r.get("response") or "").strip(),
+                "response": str(r.get("response") or "").strip(),
                 "ok": r.get("status") == "SUCCESS",
                 "error": r.get("error"),
                 "usage": r.get("usage"),
@@ -195,15 +239,17 @@ class Run:
             }
 
     def _handle_claude(self, event: dict[str, Any]) -> None:
-        if event.get("session_id"):
+        if isinstance(event.get("session_id"), str):
             self.session_id = event["session_id"]
         if event.get("type") == "assistant":
-            for block in (event.get("message") or {}).get("content") or []:
-                if block.get("type") == "tool_use":
-                    self._count_tool(block.get("name") or "?")
+            message = event.get("message")
+            content = message.get("content") if isinstance(message, dict) else None
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    self._count_tool(str(block.get("name") or "?"))
         if event.get("type") == "result":
             self.result = {
-                "response": (event.get("result") or "").strip(),
+                "response": str(event.get("result") or "").strip(),
                 "ok": not event.get("is_error") and event.get("subtype") == "success",
                 "error": event.get("result") if event.get("is_error") else None,
                 "usage": event.get("usage"),
@@ -214,6 +260,7 @@ class Run:
 
     def run(self, cmd: list[str], cwd: Path) -> int:
         handle = self._handle_claude if self.job["agent"] == "claude" else self._handle_agy
+        self.deadline = time.monotonic() + self.timeout_s + 30  # fresh budget per process
         proc = subprocess.Popen(
             cmd,
             cwd=cwd,
@@ -222,87 +269,130 @@ class Run:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            start_new_session=True,  # so a kill takes the agent's children with it
+            start_new_session=True,  # its own process group, killed as a whole
+            **_as_agent(),
         )
-        stderr_tail: list[str] = []
-        threading.Thread(
-            target=lambda: [stderr_tail.append(line) for line in proc.stderr], daemon=True
-        ).start()
+        stderr_tail: collections.deque[str] = collections.deque(maxlen=40)
+        reader = threading.Thread(target=lambda: stderr_tail.extend(proc.stderr), daemon=True)
+        reader.start()
         threading.Thread(target=self._watch, args=(proc,), daemon=True).start()
-
-        for line in proc.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-                handle(event)
-                self._pending.append(event)
-            except json.JSONDecodeError:
-                self._pending.append({"event": "raw", "line": line[:2000]})
-            self._flush()
-        code = proc.wait()
-        self._flush(force=True)
-        self.stderr = "".join(stderr_tail[-20:])[-4000:]
-        return code
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    event = {"event": "raw", "line": line[:2000]}
+                if isinstance(event, dict):
+                    try:
+                        handle(event)
+                    except Exception:
+                        log.warning("unexpected event shape: %.200s", line, exc_info=True)
+                    self._queue(event)
+                self._flush()
+            return proc.wait()
+        finally:
+            _kill_group(proc)  # also reaps background children the agent left behind
+            proc.stdout.close()
+            reader.join(timeout=5)
+            self.stderr = "".join(stderr_tail)[-4000:]
+            self._flush(force=True)
 
     def _watch(self, proc: subprocess.Popen) -> None:
-        """Kill the agent on cancel, timeout, or tool cap; flush events while it's quiet."""
-        while proc.poll() is None:
-            if time.monotonic() > self.deadline:
-                self.stop_reason = self.stop_reason or "timed_out"
-            if self.stop_reason:
-                log.info("stopping job %s: %s", self.job["id"], self.stop_reason)
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                    time.sleep(5)
-                    if proc.poll() is None:
-                        os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                return
-            time.sleep(1)
-            if time.monotonic() - self._last_flush > 20:
-                self._flush(force=True)  # heartbeat during long silent steps
+        """Kill the agent on cancel, timeout, tool cap or shutdown; heartbeat while it's quiet."""
+        try:
+            while proc.poll() is None:
+                if time.monotonic() > self.deadline:
+                    self.stop_reason = self.stop_reason or "timed_out"
+                if _stop.is_set():
+                    self.stop_reason = self.stop_reason or "shutdown"
+                if self.stop_reason:
+                    log.info("stopping job %s: %s", self.job["id"], self.stop_reason)
+                    _kill_group(proc)
+                    return
+                time.sleep(1)
+                if time.monotonic() - self._last_flush > 20:
+                    self._flush(force=True)
+        except Exception:
+            log.exception("watchdog failed for job %s; killing the agent", self.job["id"])
+            _kill_group(proc)
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    for _ in range(50):
+        if proc.poll() is not None:
+            break
+        time.sleep(0.1)
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 # ---------------------------------------------------------------- jobs
 
 
 class JobFailed(Exception):
-    """A job that can't run (bad repo, clone failure, unsupported profile)."""
+    """A job that can't run (bad repo, clone failure, unsupported profile, bad input)."""
 
 
 def _git(*args: str, cwd: Path | None = None, timeout: int = 180) -> str:
-    """git with hooks disabled and no credential prompts."""
-    proc = subprocess.run(
+    """git as the agent user, with hooks disabled and no credential prompts."""
+    proc = subprocess.Popen(
         ["git", "-c", "core.hooksPath=/dev/null", *args],
         cwd=cwd,
-        env={**_agent_env("git"), "GIT_TERMINAL_PROMPT": "0"},
-        capture_output=True,
+        env=_agent_env("git"),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=timeout,
+        start_new_session=True,
+        **_as_agent(),
     )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        raise JobFailed(f"git {args[0]} timed out") from None
     if proc.returncode != 0:
-        raise JobFailed(f"git {args[0]} failed: {proc.stderr.strip()[-500:]}")
-    return proc.stdout
+        raise JobFailed(f"git {args[0]} failed: {err.strip()[-500:]}")
+    return out
 
 
-def _prepare_repo(job: dict[str, Any], workspace: Path) -> Path:
-    """A checkout of the job's repo in its workspace (a follow-up reuses its parent's)."""
-    if job.get("resume_session_id") and job.get("parent_id"):
-        parent_repo = JOBS_DIR / str(job["parent_id"]) / "repo"
+def _workspace(job_id: str) -> Path:
+    path = JOBS_DIR / str(uuid.UUID(str(job_id)))  # validates: no path tricks in ids
+    path.mkdir(parents=True, exist_ok=True)
+    shutil.chown(path, AGENT_USER, AGENT_USER)
+    return path
+
+
+def _prepare_repo(job: dict[str, Any], workspace: Path) -> tuple[Path, str | None]:
+    """A checkout of the job's repo, and the session to resume (None if it can't be resumed)."""
+    resume = job.get("resume_session_id")
+    if resume and job.get("parent_id"):
+        parent_repo = JOBS_DIR / str(uuid.UUID(str(job["parent_id"]))) / "repo"
         if parent_repo.is_dir():
-            return parent_repo
+            os.utime(parent_repo.parent)  # keep an active session's workspace from aging out
+            return parent_repo, resume
     repo = (job.get("params") or {}).get("repo") or ""
     if not _REPO_RE.match(repo):
         raise JobFailed(f"invalid repo '{repo}'")
-    dest = workspace / "repo"
-    if not dest.exists():
-        # Public repos clone anonymously; private ones need the GitHub App (plans/07 phase 3b).
+    dest, tmp = workspace / "repo", workspace / "repo.tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    # Public repos clone anonymously; private ones need the GitHub App (plans/07 phase 3b).
+    try:
         _git("clone", "--depth", "50", "--single-branch", f"https://github.com/{repo}.git",
-             str(dest))
-    return dest
+             str(tmp))
+    except JobFailed:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    tmp.rename(dest)
+    return dest, None  # a fresh checkout has no session to resume
 
 
 _EMPTY_RETRY_PROMPT = (
@@ -313,19 +403,20 @@ _EMPTY_RETRY_PROMPT = (
 
 def run_job(job: dict[str, Any]) -> dict[str, Any]:
     """Run one job to completion and return the finish payload for Sazed."""
-    workspace = JOBS_DIR / str(job["id"])
-    workspace.mkdir(parents=True, exist_ok=True)
-    resume = job.get("resume_session_id")
+    workspace = _workspace(job["id"])
     run = Run(job)
 
     if job["agent"] == "agy":
+        resume = job.get("resume_session_id")
+        if resume and job.get("parent_id"):
+            parent = JOBS_DIR / str(uuid.UUID(str(job["parent_id"])))
+            workspace = parent if parent.is_dir() else workspace
         code = run.run(_agy_command(job, job["prompt"], resume), workspace)
         result = run.result or {}
         # agy ends with an empty answer when its last step was a tool headless mode refused.
         # Resume the same conversation once and ask it to answer with what it has.
-        if not result.get("response") and not run.stop_reason and run.session_id and result.get(
-            "denied"
-        ):
+        if (not result.get("response") and not run.stop_reason and run.session_id
+                and result.get("denied")):
             log.info("job %s: empty answer after denied %s, resuming once", job["id"],
                      result.get("denied"))
             run.result = None
@@ -333,11 +424,11 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
     elif job["agent"] == "claude":
         if job["profile"] not in _CLAUDE_PROFILES:
             return {"status": "failed", "error": f"profile '{job['profile']}' is not supported yet"}
-        try:
-            cwd = _prepare_repo(job, workspace)
-        except (JobFailed, subprocess.TimeoutExpired) as e:
-            return {"status": "failed", "error": str(e)}
-        code = run.run(_claude_command(job, job["prompt"], resume), cwd)
+        cwd, resume = _prepare_repo(job, workspace)
+        prompt = job["prompt"]
+        if job.get("resume_session_id") and not resume:
+            prompt = f"(The earlier session could not be resumed; start fresh.)\n\n{prompt}"
+        code = run.run(_claude_command(job, prompt, resume), cwd)
     else:
         return {"status": "failed", "error": f"agent '{job['agent']}' is not supported"}
 
@@ -354,13 +445,13 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
     }
     base = {"agent_session_id": run.session_id, "meta": meta}
     partial = {"result": response or None}
-    if run.stop_reason == "cancelled":
-        return base | {"status": "failed", "error": "cancelled"}
+    if run.stop_reason in ("cancelled", "shutdown"):
+        return base | {"status": "failed", "error": run.stop_reason}
     if run.stop_reason == "timed_out":
         return base | partial | {"status": "timed_out", "error": "hit the job timeout"}
     if run.stop_reason == "tool_cap":
         return base | partial | {"status": "failed",
-                                 "error": f"stopped after {run.max_tools} tool calls"}
+                                 "error": f"stopped at the {run.max_tools}-tool-call cap"}
     if result.get("ok") and response:
         return base | {"status": "succeeded", "result": response}
     error = (
@@ -375,44 +466,59 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
 def _cleanup_workspaces() -> None:
     cutoff = time.time() - WORKSPACE_KEEP_DAYS * 86400
     for path in JOBS_DIR.glob("*"):
-        if path.is_dir() and path.stat().st_mtime < cutoff:
-            shutil.rmtree(path, ignore_errors=True)
+        try:
+            if path.is_dir() and path.stat().st_mtime < cutoff:
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            log.warning("cleanup skipped %s", path, exc_info=True)
+
+
+def _finish(job_id: str, payload: dict[str, Any]) -> None:
+    """Post the result, retrying through short Sazed outages so a result isn't lost."""
+    for attempt in range(6):
+        status, body = _post(f"/worker/jobs/{job_id}/finish", payload)
+        if status == 200:
+            log.info("job %s finished %s (%s)", job_id, payload["status"], body)
+            return
+        log.warning("finish post for %s failed (%s): %s", job_id, status, body)
+        time.sleep(min(60, 5 * 2**attempt))
+    log.error("giving up on posting job %s; Sazed will time it out", job_id)
 
 
 def main() -> None:
     if not WORKER_KEY:
         raise SystemExit("SAZED_WORKER_KEY is not set")
+    if os.geteuid() != 0:
+        raise SystemExit("run as root (it starts agents as the unprivileged agent user)")
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
-    signal.signal(signal.SIGTERM, lambda *_: _stop.set())
+    shutil.chown(JOBS_DIR, AGENT_USER, AGENT_USER)
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, lambda *_: _stop.set())
     hostname = socket.gethostname()
-    log.info("sazed-worker started: %s, agents %s", SAZED_URL, _agents())
+    log.info("sazed-worker started: %s, agents %s as %s", SAZED_URL, _agents(), AGENT_USER)
     last_cleanup = 0.0
 
     while not _stop.is_set():
         if time.time() - last_cleanup > 3600:
             _cleanup_workspaces()
             last_cleanup = time.time()
-        try:
-            status, job = _post("/worker/claim", {"agents": _agents(), "worker": hostname})
-        except (urllib.error.URLError, OSError) as e:
-            log.warning("claim failed: %s", e)
-            _stop.wait(POLL_SECONDS * 3)
-            continue
-        if status == 204 or not job:
+        status, job = _post("/worker/claim", {"agents": _agents(), "worker": hostname})
+        if status != 200 or not isinstance(job, dict):
             if status not in (200, 204):
                 log.warning("claim returned %s: %s", status, job)
-            _stop.wait(POLL_SECONDS)
+            _stop.wait(POLL_SECONDS if status in (200, 204) else POLL_SECONDS * 3)
             continue
 
-        log.info("job %s: %s on %s/%s (%s)", job["id"], job["kind"], job["agent"], job["model"],
-                 job["profile"])
+        log.info("job %s: %s on %s/%s (%s)", job.get("id"), job.get("kind"), job.get("agent"),
+                 job.get("model"), job.get("profile"))
         try:
             payload = run_job(job)
+        except JobFailed as e:
+            payload = {"status": "failed", "error": str(e)}
         except Exception as e:  # never leave a claimed job hanging
-            log.exception("job %s crashed", job["id"])
+            log.exception("job %s crashed", job.get("id"))
             payload = {"status": "failed", "error": f"worker error: {type(e).__name__}: {e}"}
-        status, body = _post(f"/worker/jobs/{job['id']}/finish", payload)
-        log.info("job %s finished %s (posted %s %s)", job["id"], payload["status"], status, body)
+        _finish(str(job.get("id")), payload)
 
 
 if __name__ == "__main__":
