@@ -271,7 +271,9 @@ class Run:
 
     def run(self, cmd: list[str], cwd: Path) -> int:
         handle = self._handle_claude if self.job["agent"] == "claude" else self._handle_agy
-        self.deadline = time.monotonic() + self.timeout_s + DEADLINE_GRACE_S  # fresh budget per process
+        self.deadline = (
+            time.monotonic() + self.timeout_s + DEADLINE_GRACE_S
+        )  # fresh budget per process
         proc = subprocess.Popen(
             cmd,
             cwd=cwd,
