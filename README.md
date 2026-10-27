@@ -10,6 +10,21 @@ Sazed owns the job queue, the prompts, the model allowlist, the daily caps and t
 
 It runs one job at a time and uses only the Python standard library.
 
+## Code layout
+
+`worker.py` is the entry point the systemd unit runs; the code is in the `sazed_worker` package beside it:
+
+| module | what it holds |
+|---|---|
+| `config` | environment, the agent user's paths, limits, the logger, the stop flag |
+| `scrub`, `sazed_api` | secret scrubbing, and the three Sazed worker routes |
+| `agent_process` | running children as the agent user, killing their process groups, `JobFailed` |
+| `agy`, `claude` | each CLI's command line (and Claude's profiles) and how its event stream is read |
+| `run` | one agent process, streamed to Sazed under the timeout and tool-call cap |
+| `repo`, `changes`, `lint` | workspaces and checkouts, the changed-file list, the ruff pre-check |
+| `jobs` | one job from start to its finish payload |
+| `main` | the claim loop and workspace cleanup |
+
 ## How it runs
 
 - **Users:** `worker.py` runs as root under systemd (`sazed-worker.service`), but only so it can start every agent, and every git command, as the unprivileged `agent` user. The CLIs and their logins live in `/home/agent`.
@@ -42,7 +57,7 @@ All three routes are authenticated with `X-Worker-Key`:
 ./deploy.sh
 ```
 
-It copies `worker.py` and the unit to CT 110 over SSH through the Proxmox host, then restarts the service. There's deliberately no GitHub runner on CT 110.
+It copies `worker.py`, the `sazed_worker` package and the unit to CT 110 over SSH through the Proxmox host, then restarts the service. There's deliberately no GitHub runner on CT 110.
 
 ## Setup notes
 

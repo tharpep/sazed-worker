@@ -32,7 +32,7 @@ jobs:
         run: pip install ruff==0.17.1
 
       - name: Python compiles
-        run: python -m compileall -q worker.py
+        run: python -m compileall -q worker.py sazed_worker
 
       - name: Lint (whole repo, ruff.toml)
         run: ruff check --output-format=github .

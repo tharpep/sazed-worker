@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Deploy worker.py and the systemd unit to CT 110 and restart the service.
+# Deploy worker.py, the sazed_worker package and the systemd unit to CT 110 and restart the
+# service.
 #
 #   ./deploy.sh
 #
@@ -12,12 +13,14 @@ PROXMOX="root@192.168.50.111"
 SSH_KEY="$HOME/.ssh/proxmox_media"
 VMID=110
 
-python -m py_compile worker.py
-tar -cf - worker.py sazed-worker.service | ssh -i "$SSH_KEY" -o BatchMode=yes "$PROXMOX" \
-  "pct exec $VMID -- sh -c 'set -e
+python -m compileall -q worker.py sazed_worker
+tar -cf - worker.py sazed_worker/*.py sazed-worker.service | ssh -i "$SSH_KEY" -o BatchMode=yes \
+  "$PROXMOX" "pct exec $VMID -- sh -c 'set -e
 mkdir -p /opt/sazed-worker
+rm -rf /opt/sazed-worker/sazed_worker
 tar --no-same-owner -xf - -C /opt/sazed-worker
-chmod 644 /opt/sazed-worker/worker.py
+chmod 755 /opt/sazed-worker/sazed_worker
+chmod 644 /opt/sazed-worker/worker.py /opt/sazed-worker/sazed_worker/*.py
 mv /opt/sazed-worker/sazed-worker.service /etc/systemd/system/sazed-worker.service
 systemctl daemon-reload
 systemctl enable --quiet sazed-worker
