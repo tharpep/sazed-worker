@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING, Any
 
 from .agent_process import safe_arg
-from .config import CLAUDE
+from .config import CLAUDE, TOOL_RESULT_PREVIEW
 
 if TYPE_CHECKING:
     from .run import Run
@@ -46,9 +46,32 @@ def command(job: dict[str, Any], prompt: str, resume: str | None) -> list[str]:
     return [*cmd, "--", prompt]
 
 
+def _rate_limit_reading(event: dict[str, Any]) -> dict[str, Any] | None:
+    """Pryce's plan usage from a rate_limit_event: status, overage, and each window's
+    utilization (0-1) and reset time (epoch seconds)."""
+    info = event.get("rate_limit_info")
+    if not isinstance(info, dict):
+        return None
+    reading: dict[str, Any] = {
+        "status": info.get("status"),
+        "overage": info.get("isUsingOverage"),
+        "overage_status": info.get("overageStatus"),
+    }
+    windows = info.get("unifiedWindows")
+    for name, window in (windows if isinstance(windows, dict) else {}).items():
+        if isinstance(window, dict):
+            reading[name] = {"utilization": window.get("utilization"),
+                             "resets_at": window.get("resetsAt")}
+    return {k: v for k, v in reading.items() if v is not None}
+
+
 def handle_event(run: "Run", event: dict[str, Any]) -> None:
     if isinstance(event.get("session_id"), str):
         run.session_id = event["session_id"]
+    if event.get("type") == "rate_limit_event" and (reading := _rate_limit_reading(event)):
+        # First and last reading per job; the governor (plans/10 section 5) uses the change.
+        run.rate_limits.setdefault("first", reading)
+        run.rate_limits["last"] = reading
     if event.get("type") == "assistant":
         message = event.get("message")
         content = message.get("content") if isinstance(message, dict) else None
@@ -65,3 +88,27 @@ def handle_event(run: "Run", event: dict[str, Any]) -> None:
             "denied": event.get("permission_denials") or None,
             "turns": event.get("num_turns"),
         }
+
+
+def trim_event(event: dict[str, Any]) -> dict[str, Any]:
+    """What's saved of an event: tool results are cut to a preview and the duplicate
+    `tool_use_result` (the same file contents again) is dropped. Called after handle_event,
+    which always sees the full event."""
+    if event.get("type") != "user":
+        return event
+    event = {k: v for k, v in event.items() if k != "tool_use_result"}
+    message = event.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return event
+    blocks = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "tool_result":
+            text = block.get("content")
+            if isinstance(text, list):
+                text = "\n".join(str(b.get("text", "")) for b in text if isinstance(b, dict))
+            text = str(text or "")
+            if len(text) > TOOL_RESULT_PREVIEW:
+                block = block | {"content": text[:TOOL_RESULT_PREVIEW], "truncated": len(text)}
+        blocks.append(block)
+    return event | {"message": message | {"content": blocks}}
