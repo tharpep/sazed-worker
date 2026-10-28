@@ -74,6 +74,7 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         "denied": result.get("denied"),
         "turns": result.get("turns"),
         "exit_code": code,
+        "rate_limits": run.rate_limits or None,
     }
     base = {"agent_session_id": run.session_id, "meta": meta}
     partial = {"result": response or None}

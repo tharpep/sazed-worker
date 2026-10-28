@@ -27,6 +27,7 @@ class Run:
         self.tools_used: list[str] = []
         self.result: dict[str, Any] | None = None  # normalized: response, ok, error, usage, ...
         self.session_id: str | None = None
+        self.rate_limits: dict[str, Any] = {}  # first and last plan-usage reading (Claude only)
         self.stop_reason: str | None = None  # cancelled | timed_out | tool_cap | shutdown
         self.stderr = ""
         self._pending: list[dict[str, Any]] = []
@@ -61,7 +62,7 @@ class Run:
             self.stop_reason = self.stop_reason or "tool_cap"
 
     def run(self, cmd: list[str], cwd: Path) -> int:
-        handle = claude.handle_event if self.job["agent"] == "claude" else agy.handle_event
+        agent = claude if self.job["agent"] == "claude" else agy
         self.deadline = (
             time.monotonic() + self.timeout_s + DEADLINE_GRACE_S
         )  # fresh budget per process
@@ -91,10 +92,16 @@ class Run:
                     event = {"event": "raw", "line": line[:2000]}
                 if isinstance(event, dict):
                     try:
-                        handle(self, event)
+                        agent.handle_event(self, event)
                     except Exception:
                         log.warning("unexpected event shape: %.200s", line, exc_info=True)
-                    self._queue(event)
+                    try:
+                        saved = agent.trim_event(event)
+                    except Exception:
+                        log.warning("couldn't trim event: %.200s", line, exc_info=True)
+                        saved = event
+                    if saved is not None:
+                        self._queue(saved)
                 self._flush()
             return proc.wait()
         finally:

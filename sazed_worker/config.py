@@ -23,6 +23,7 @@ FLUSH_SECONDS = 2
 MAX_PENDING_EVENTS = 2000
 WORKSPACE_KEEP_DAYS = 14
 DEADLINE_GRACE_S = 30  # extra seconds past the job timeout before the watchdog kills the agent
+TOOL_RESULT_PREVIEW = 500  # characters of each Claude tool result kept in the saved events
 SAFE_ARG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 
 log = logging.getLogger("sazed-worker")

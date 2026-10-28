@@ -25,6 +25,16 @@ def command(job: dict[str, Any], prompt: str, resume: str | None) -> list[str]:
     return cmd
 
 
+def trim_event(event: dict[str, Any]) -> dict[str, Any] | None:
+    """What's saved of an event: the answer's word-by-word chunks are dropped (the result event
+    carries the whole answer); everything else is kept."""
+    step = event.get("step_update")
+    if (isinstance(step, dict) and step.get("step_type") == "agent_response"
+            and step.get("state") == "ACTIVE" and "text_delta" in step):
+        return None
+    return event
+
+
 def handle_event(run: "Run", event: dict[str, Any]) -> None:
     if isinstance(event.get("conversation_id"), str):
         run.session_id = event["conversation_id"]
