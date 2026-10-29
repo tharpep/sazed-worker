@@ -21,6 +21,9 @@ Modules:
 - run: one agent process, streamed to Sazed under the timeout and tool-call cap
 - repo, changes, checks: checkouts, the changed-file list, and the checks run on a change
   job's edits (ruff, bash -n, gofmt/go vet, tsc)
+- jail, deps, tests: the bubblewrap jail for repo-controlled code, dependency setup, and the
+  repo's own tests (pytest, go test) run by the worker after a change job's build
+- report: the shape check on a change job's closing JSON block
 - jobs: one job from start to finish payload
 - main: the claim loop
 """

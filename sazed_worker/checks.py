@@ -295,8 +295,10 @@ class Checks:
 
 def checks_prompt(issues: list[str]) -> str:
     return (
-        "The worker's checks (the repo's own ruff config, bash -n, go vet, tsc) found these "
-        "problems in your changes:\n" + "\n".join(f"- {i}" for i in issues) + "\n\nFix them, "
-        "touching only what is needed. Then reply with the complete PR description again "
-        "(updated if anything changed), in the same format as before."
+        "The worker's checks (the repo's own ruff config, bash -n, go vet, tsc) and the repo's own "
+        "tests, which the worker ran, found these problems in your changes:\n"
+        + "\n".join(f"- {i}" for i in issues)
+        + "\n\nFix them, touching only what is needed. You still can't run anything; the worker "
+        "runs the checks and tests again afterwards. Then reply with the complete PR description "
+        "again (updated if anything changed), in the same format as before."
     )

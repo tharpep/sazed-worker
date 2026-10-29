@@ -24,13 +24,9 @@ GO = "/usr/bin/go"
 GOFMT = "/usr/bin/gofmt"
 NPM = "/usr/bin/npm"
 COREPACK = "/usr/bin/corepack"
-BWRAP = "/usr/bin/bwrap"  # jails dependency installs and checks (jail.py)
+BWRAP = "/usr/bin/bwrap"  # jails dependency installs, checks and the repo's tests (jail.py)
 POETRY = "/usr/bin/poetry"
 PYTHONS_DIR = Path("/opt/uv-python")  # uv-managed Pythons for repos 3.14 can't install yet
-# Repos whose change jobs get the sandboxed shell (plans/10 P1.11). Off: the third live probe
-# (2026-10-29) found Claude Code's sandbox on CT 110 letting commands write to the agent's home
-# and reach sockets under /run. Tests move to the worker's own jail instead.
-SHELL_REPOS: frozenset[str] = frozenset()
 POLL_SECONDS = 5
 FLUSH_SECONDS = 2
 MAX_PENDING_EVENTS = 2000
