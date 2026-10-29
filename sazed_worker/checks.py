@@ -8,30 +8,22 @@ each reporting only what the agent's edits introduced:
 - go vet, tsc: findings that the same command doesn't report on the untouched checkout
 
 Findings feed the job's one fix round. A check whose tool isn't installed, or whose setup fails
-(module download, package install), is skipped and named in the job's meta.
+(module download, package install), is skipped and named in the job's meta. Every command runs
+in the worker's bubblewrap jail (jail.py): tsc and go vet load package code.
 """
 
 import difflib
 import json
 import re
 import shutil
-import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .agent_process import agent_env, as_agent, kill_group
-from .config import AGENT_GID, AGENT_HOME, AGENT_UID, BASH, COREPACK, GO, GOFMT, NPM, RUFF, log
+from .config import AGENT_GID, AGENT_UID, BASH, COREPACK, GO, GOFMT, NPM, RUFF, log
+from .jail import go_env, run_jailed
 
 MAX_FINDINGS = 40
-_GO_ENV = {
-    # No toolchain downloads (a go.mod "toolchain" line would fetch and run one), no go.mod edits.
-    "GOTOOLCHAIN": "local",
-    "GOFLAGS": "-mod=readonly",
-    "GOPATH": f"{AGENT_HOME}/go",
-    "GOCACHE": f"{AGENT_HOME}/.cache/go-build",
-    "CGO_ENABLED": "0",
-}
 _GO_LINE = re.compile(r"^(?:vet: )?(?:\./)?(\S+?\.go):(\d+)(?::\d+)?: (.+)$")
 _TSC_LINE = re.compile(r"^(\S.*?\.[cm]?tsx?)\((\d+),\d+\): error (TS\d+: .+)$")
 _TS_SUFFIXES = (".ts", ".tsx", ".mts", ".cts")
@@ -40,31 +32,6 @@ _INSTALLERS = {
     "pnpm-lock.yaml": [COREPACK, "pnpm", "install", "--frozen-lockfile", "--ignore-scripts"],
     "package-lock.json": [NPM, "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
 }
-
-
-def _run(
-    cmd: list[str], cwd: Path, timeout: int, env: dict[str, str] | None = None
-) -> tuple[int | None, str, str]:
-    """(exit code, stdout, stderr) as the agent user; exit code None if it couldn't finish."""
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=cwd,
-            env=agent_env("check") | (env or {}),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            start_new_session=True,
-            **as_agent(),
-        )
-    except OSError as e:
-        return None, "", str(e)
-    try:
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        kill_group(proc)
-        return None, "", f"{Path(cmd[0]).name} timed out"
-    return proc.returncode, out, err
 
 
 def _changed_lines(before: bytes | None, after: bytes) -> set[int]:
@@ -138,6 +105,11 @@ class Checks:
                 path.unlink(missing_ok=True)
         self._installed = []
 
+    def _run(
+        self, cmd: list[str], cwd: Path, timeout: int, env: dict[str, str] | None = None
+    ) -> tuple[int | None, str, str]:
+        return run_jailed(cmd, cwd, self.deps_root, timeout, env)
+
     def _baseline(self, key: Any, compute: Callable[[], dict[str, str] | None]) -> dict[str, str]:
         if key not in self._baselines:
             self._baselines[key] = compute()
@@ -153,7 +125,7 @@ class Checks:
             self.skipped.add("ruff (not installed)")
             return None
         cmd = [RUFF, "check", "--output-format=json", "--no-cache", "--quiet", "--exit-zero"]
-        code, out, _ = _run([*cmd, *py], self.work, 60)
+        code, out, _ = self._run([*cmd, *py], self.work, 60)
         try:
             findings = json.loads(out or "[]") if code is not None else None
         except json.JSONDecodeError:
@@ -197,11 +169,11 @@ class Checks:
             return None
         issues = []
         for rel in scripts:
-            code, _, err = _run([BASH, "-n", rel], self.work, 20)
+            code, _, err = self._run([BASH, "-n", rel], self.work, 20)
             if code in (0, None):
                 continue
             if (self.repo_dir / rel).is_file():
-                before, _, _ = _run([BASH, "-n", rel], self.repo_dir, 20)
+                before, _, _ = self._run([BASH, "-n", rel], self.repo_dir, 20)
                 if before != 0:
                     continue  # it didn't parse before the edit either
             first = next((line for line in err.splitlines() if line.strip()), "syntax error")
@@ -221,11 +193,11 @@ class Checks:
             if rel in self.formatted:
                 continue
             if (self.repo_dir / rel).is_file():
-                code, out, _ = _run([GOFMT, "-l", rel], self.repo_dir, 30)
+                code, out, _ = self._run([GOFMT, "-l", rel], self.repo_dir, 30)
                 if code != 0 or out.strip():
                     continue  # it wasn't gofmt-clean before: leave its formatting alone
-            code, out, _ = _run([GOFMT, "-l", rel], self.work, 30)
-            if code == 0 and out.strip() and _run([GOFMT, "-w", rel], self.work, 30)[0] == 0:
+            code, out, _ = self._run([GOFMT, "-l", rel], self.work, 30)
+            if code == 0 and out.strip() and self._run([GOFMT, "-w", rel], self.work, 30)[0] == 0:
                 self.formatted.append(rel)
         issues: list[str] = []
         for module in sorted({_nearest(self.work, rel, "go.mod") for rel in go_files} - {None}):
@@ -242,7 +214,7 @@ class Checks:
         if it failed without findings (a module download, a bad go.mod)."""
         if not (root / module / "go.mod").is_file():
             return {}
-        code, out, err = _run([GO, "vet", "./..."], root / module, 300, _GO_ENV)
+        code, out, err = self._run([GO, "vet", "./..."], root / module, 300, go_env(self.deps_root))
         if code is None:
             return None
         found = {}
@@ -266,7 +238,7 @@ class Checks:
         if len(projects) > 1:
             self.skipped.add(f"tsc (only {projects[0] or '.'} checked of {len(projects)})")
         project = projects[0]
-        tsc = self._install(project)
+        tsc = self.install_packages(project)
         if tsc is None:
             return None
         after = self._tsc_run(tsc, self.work, project)
@@ -278,7 +250,7 @@ class Checks:
         )
         return [shown for key, shown in sorted(after.items()) if key not in before]
 
-    def _install(self, project: str) -> Path | None:
+    def install_packages(self, project: str) -> Path | None:
         """Install the project's packages in the workspace folder (an ancestor of both trees, so
         both resolve them and they never show up as changed files). Returns tsc's path."""
         tsc = self.deps_root / "node_modules" / ".bin" / "tsc"
@@ -300,7 +272,7 @@ class Checks:
             shutil.chown(self.deps_root / name, AGENT_UID, AGENT_GID)
         self._installed.append(self.deps_root / "node_modules")
         env = {"COREPACK_ENABLE_DOWNLOAD_PROMPT": "0", "CI": "true"}
-        code, _, err = _run(installer, self.deps_root, 300, env)
+        code, _, err = self._run(installer, self.deps_root, 300, env)
         if code != 0 or not tsc.exists():
             log.info("package install failed for %s: %s", project or ".", err.strip()[-300:])
             self.skipped.add(f"tsc ({project or '.'}: package install failed)")
@@ -309,7 +281,7 @@ class Checks:
 
     def _tsc_run(self, tsc: Path, root: Path, project: str) -> dict[str, str] | None:
         cmd = [str(tsc), "--noEmit", "--pretty", "false", "-p", "tsconfig.json"]
-        code, out, _ = _run(cmd, root / project, 300)
+        code, out, _ = self._run(cmd, root / project, 300)
         if code is None:
             return None
         found = {}

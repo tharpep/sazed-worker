@@ -7,6 +7,8 @@ from pathlib import Path
 from .agent_process import JobFailed
 
 _MAX_CHANGED_FILES = 200
+# Never part of a PR: git internals, and caches a test or check run can leave in the working copy.
+_SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache", "node_modules"}
 _MAX_CHANGED_BYTES = 5 * 1024 * 1024
 
 
@@ -16,7 +18,7 @@ def changed_files(repo_dir: Path, work: Path) -> dict[str, str | None]:
     def files(root: Path) -> dict[str, Path]:
         out = {}
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d != ".git"]
+            dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
             for name in filenames:
                 path = Path(dirpath) / name
                 if not path.is_symlink():

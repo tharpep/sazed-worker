@@ -11,6 +11,7 @@ from .config import JOBS_DIR, log
 from .repo import prepare_repo, repo_instructions, workspace
 from .report import repair_prompt, report_problem
 from .run import Run
+from .shell import prepare_shell
 
 # Stops that don't mean "give up": Sazed pauses a change job stopped this way (plans/10 P1.7).
 PAUSING_STOPS = ("timed_out", "tool_cap", "shutdown")
@@ -50,53 +51,65 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         prompt = job["prompt"]
         if job.get("resume_session_id") and not resume:
             prompt = f"(The earlier session could not be resumed; start fresh.)\n\n{prompt}"
+        # The sandboxed shell, with dependencies installed first (shell.py); None for most jobs.
+        shell = prepare_shell(job, repo_dir, cwd)
+        env = shell.env if shell else None
+        if shell:
+            prompt = shell.note() + prompt
         if not resume:
             prompt = repo_instructions(repo_dir) + prompt
-        code = run.run(claude.command(job, prompt, resume), cwd)
-        if job["profile"] == "change" and (run.result or {}).get("ok"):
-            checks = Checks(repo_dir, cwd)
-            try:
-                changes = changed_files(repo_dir, cwd)
-                issues = checks.run(changes)
-                if checks.formatted:
-                    changes = changed_files(repo_dir, cwd)  # gofmt rewrote some files
-                lint_meta = {"lint_found": len(issues)}
-                if issues and not run.stop_reason and run.session_id:
-                    log.info("job %s: %d check finding(s) in its changes, one fix round",
-                             job["id"], len(issues))
+        try:
+            code = run.run(claude.command(job, prompt, resume, shell), cwd, env)
+            if job["profile"] == "change" and (run.result or {}).get("ok"):
+                checks = Checks(repo_dir, cwd)
+                try:
+                    changes = changed_files(repo_dir, cwd)
+                    issues = checks.run(changes)
+                    if checks.formatted:
+                        changes = changed_files(repo_dir, cwd)  # gofmt rewrote some files
+                    lint_meta = {"lint_found": len(issues)}
+                    if issues and not run.stop_reason and run.session_id:
+                        log.info("job %s: %d check finding(s) in its changes, one fix round",
+                                 job["id"], len(issues))
+                        first = run.result
+                        run.result = None
+                        fix = claude.command(job, checks_prompt(issues), run.session_id, shell)
+                        code = run.run(fix, cwd, env)
+                        if (run.result or {}).get("ok"):
+                            changes = changed_files(repo_dir, cwd)
+                        else:
+                            run.result = first  # keep the original answer if the fix round failed
+                        lint_meta["lint_left"] = checks.run(changes)
+                        changes = changed_files(repo_dir, cwd)
+                    lint_meta |= checks.meta()
+                finally:
+                    checks.cleanup()
+                # Sazed builds the PR description from the reply's JSON block: one repair round if
+                # its shape is off. A failed repair keeps the reply (Sazed falls back to its prose).
+                problem = report_problem((run.result or {}).get("response") or "")
+                if problem and not run.stop_reason and run.session_id:
+                    log.info("job %s: result block unusable (%s), one repair round", job["id"],
+                             problem)
                     first = run.result
                     run.result = None
-                    code = run.run(claude.command(job, checks_prompt(issues), run.session_id), cwd)
-                    if (run.result or {}).get("ok"):
-                        changes = changed_files(repo_dir, cwd)
+                    repair = claude.command(job, repair_prompt(problem), run.session_id, shell)
+                    code = run.run(repair, cwd, env)
+                    repaired = run.result or {}
+                    if repaired.get("ok") and not report_problem(repaired.get("response") or ""):
+                        changes = changed_files(repo_dir, cwd)  # in case it edited anyway
                     else:
-                        run.result = first  # keep the original answer if the fix round failed
-                    lint_meta["lint_left"] = checks.run(changes)
+                        run.result = first
+                    lint_meta["result_repaired"] = run.result is not first
+            if job["profile"] == "change" and run.stop_reason in PAUSING_STOPS:
+                # Sazed pauses the job and saves this as a draft PR, so a resume picks it up.
+                try:
                     changes = changed_files(repo_dir, cwd)
-                lint_meta |= checks.meta()
-            finally:
-                checks.cleanup()
-            # Sazed builds the PR description from the reply's JSON block: one repair round if
-            # its shape is off. A failed repair keeps the reply (Sazed falls back to its prose).
-            problem = report_problem((run.result or {}).get("response") or "")
-            if problem and not run.stop_reason and run.session_id:
-                log.info("job %s: result block unusable (%s), one repair round", job["id"],
-                         problem)
-                first = run.result
-                run.result = None
-                code = run.run(claude.command(job, repair_prompt(problem), run.session_id), cwd)
-                repaired = run.result or {}
-                if repaired.get("ok") and not report_problem(repaired.get("response") or ""):
-                    changes = changed_files(repo_dir, cwd)  # in case it edited anyway
-                else:
-                    run.result = first
-                lint_meta["result_repaired"] = run.result is not first
-        if job["profile"] == "change" and run.stop_reason in PAUSING_STOPS:
-            # Sazed pauses the job and saves this as a draft PR, so a resume picks it up.
-            try:
-                changes = changed_files(repo_dir, cwd)
-            except JobFailed as e:
-                log.warning("job %s: couldn't collect the work so far: %s", job["id"], e)
+                except JobFailed as e:
+                    log.warning("job %s: couldn't collect the work so far: %s", job["id"], e)
+        finally:
+            if shell:
+                lint_meta["shell"] = shell.meta()
+                shell.cleanup()
     else:
         return {"status": "failed", "error": f"agent '{job['agent']}' is not supported"}
 

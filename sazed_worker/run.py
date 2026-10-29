@@ -61,7 +61,7 @@ class Run:
         if self.tool_calls >= self.max_tools:
             self.stop_reason = self.stop_reason or "tool_cap"
 
-    def run(self, cmd: list[str], cwd: Path) -> int:
+    def run(self, cmd: list[str], cwd: Path, env: dict[str, str] | None = None) -> int:
         agent = claude if self.job["agent"] == "claude" else agy
         self.deadline = (
             time.monotonic() + self.timeout_s + DEADLINE_GRACE_S
@@ -69,7 +69,7 @@ class Run:
         proc = subprocess.Popen(
             cmd,
             cwd=cwd,
-            env=agent_env(self.job["agent"]),
+            env=agent_env(self.job["agent"]) | (env or {}),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
