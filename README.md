@@ -23,6 +23,7 @@ It runs one job at a time and uses only the Python standard library.
 | `run` | one agent process, streamed to Sazed under the timeout and tool-call cap |
 | `repo`, `changes`, `checks` | workspaces and checkouts (and the repo's CLAUDE.md/REVIEW.md for the prompt), the changed-file list, the checks on a change job's edits |
 | `report` | the shape check on a change job's closing JSON block, and its one repair prompt |
+| `jail`, `shell` | bubblewrap jail for dependency installs and checks; the sandboxed shell for change jobs |
 | `jobs` | one job from start to its finish payload |
 | `main` | the claim loop and workspace cleanup |
 
@@ -45,7 +46,18 @@ It runs one job at a time and uses only the Python standard library.
     - `go vet` (`GOTOOLCHAIN=local`, `GOFLAGS=-mod=readonly`), compared with the untouched checkout
     - `tsc --noEmit`, after `pnpm install --frozen-lockfile --ignore-scripts` (through corepack) or `npm ci --ignore-scripts` in the workspace folder, also compared with the untouched checkout
 
-    Findings go into one fix round. A missing tool or a failed install skips that check and is named in `meta.checks_skipped`. `install-tools.sh` installs Go, Node, npm, corepack, bubblewrap and socat on CT 110.
+    Findings go into one fix round. A missing tool or a failed install skips that check and is named in `meta.checks_skipped`. `install-tools.sh` installs Go, Node, npm, corepack, bubblewrap, socat, Poetry, uv, and Pythons 3.12 and 3.13 on CT 110.
+  - **Jail:** dependency installs and checks load repo-controlled code before or after the agent, with network. They run as the `agent` user inside bubblewrap: read-only system, only their own workspace writable, the agent's home hidden (`~/.claude`, `~/.gemini`, other jobs), a private `/tmp` and no other processes.
+  - **Sandboxed shell** (repos in `SHELL_REPOS`, starting with tharpep/sazed): the agent gets Bash for `pytest`, `python -m pytest`, `ruff`, `bash -n`, `go test`, `go vet`, `gofmt -l` and `tsc`, inside Claude Code's sandbox (`--settings`). The sandbox has these settings:
+    - `failIfUnavailable`, so there's never a shell without it
+    - no unsandboxed retries
+    - no auto-approval past the allowlist
+    - no network
+    - writes only in the working copy, its temp folder and the workspace cache
+    - no reads of `~/.claude`, `~/.claude.json`, `~/.gemini`, `~/.local`, `~/.config` or other jobs
+    - `CLAUDE_CODE_OAUTH_TOKEN` unset in its commands
+
+    Dependencies are installed first, in the jail: `poetry install` into a workspace virtualenv (Python 3.12 or 3.13 from uv when the system's 3.14 doesn't fit), `go mod download`, and the pnpm or npm install. They're all removed when the job ends.
   - The worker then sends the changed files (path to base64, or null for a deletion) in the finish payload.
   - The reply ends with a JSON block that Sazed turns into the PR description. If its shape is off, the worker resumes the session once to fix it; if that fails, the first reply goes through and Sazed uses its prose.
   - A change job stopped by its timeout, the tool cap or a worker shutdown still sends the files it changed so far, with `meta.stop_reason`. Sazed pauses the job and saves them as a draft PR, and a resume continues in the same working copy.

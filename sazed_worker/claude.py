@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING, Any
 
 from .agent_process import safe_arg
 from .config import CLAUDE, TOOL_RESULT_PREVIEW
+from .shell import ALLOWED as SHELL_ALLOWED
+from .shell import Shell
 
 if TYPE_CHECKING:
     from .run import Run
@@ -11,6 +13,7 @@ if TYPE_CHECKING:
 # Which built-in tools exist per profile (--tools), which are pre-approved (--allowedTools),
 # and which reads are refused outright. With --permission-mode dontAsk anything not pre-approved
 # is refused. No Bash: even "read-only" git commands can write files (git diff --output=).
+# The one exception is a change job's sandboxed shell (shell.py), for test and check commands.
 SECRET_READS = ["Read(~/.claude/**)", "Read(~/.claude.json)", "Read(~/.gemini/**)",
                 "Read(//proc/**)", "Read(//etc/sazed-eco/**)"]
 PROFILES: dict[str, tuple[str, list[str]]] = {
@@ -22,8 +25,14 @@ PROFILES: dict[str, tuple[str, list[str]]] = {
 }
 
 
-def command(job: dict[str, Any], prompt: str, resume: str | None) -> list[str]:
+def command(
+    job: dict[str, Any], prompt: str, resume: str | None, shell: Shell | None = None
+) -> list[str]:
+    """The claude -p command line. With a shell (shell.py), Bash is added for the allowlisted
+    commands, and its sandbox settings go in through --settings."""
     tools, allowed = PROFILES[job["profile"]]
+    if shell:
+        tools, allowed = f"{tools},Bash", [*allowed, *SHELL_ALLOWED]
     cmd = [
         CLAUDE,
         "--print",
@@ -40,6 +49,8 @@ def command(job: dict[str, Any], prompt: str, resume: str | None) -> list[str]:
         "--disallowedTools",
         *SECRET_READS,
     ]
+    if shell:
+        cmd += ["--settings", shell.settings]
     if resume:
         cmd.append(f"--resume={safe_arg(resume, 'session id')}")
     # The prompt goes last, after "--", so it can never be read as an option.

@@ -24,6 +24,12 @@ GO = "/usr/bin/go"
 GOFMT = "/usr/bin/gofmt"
 NPM = "/usr/bin/npm"
 COREPACK = "/usr/bin/corepack"
+BWRAP = "/usr/bin/bwrap"  # jails dependency installs and checks (jail.py)
+POETRY = "/usr/bin/poetry"
+PYTHONS_DIR = Path("/opt/uv-python")  # uv-managed Pythons for repos 3.14 can't install yet
+# Repos whose change jobs get the sandboxed shell (plans/10 P1.11): one repo until the live leak
+# test passes, then all.
+SHELL_REPOS = frozenset({"tharpep/sazed"})
 POLL_SECONDS = 5
 FLUSH_SECONDS = 2
 MAX_PENDING_EVENTS = 2000
