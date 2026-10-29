@@ -21,7 +21,8 @@ It runs one job at a time and uses only the Python standard library.
 | `agent_process` | running children as the agent user, killing their process groups, `JobFailed` |
 | `agy`, `claude` | each CLI's command line (and Claude's profiles) and how its event stream is read |
 | `run` | one agent process, streamed to Sazed under the timeout and tool-call cap |
-| `repo`, `changes`, `lint` | workspaces and checkouts, the changed-file list, the ruff pre-check |
+| `repo`, `changes`, `lint` | workspaces and checkouts (and the repo's CLAUDE.md/REVIEW.md for the prompt), the changed-file list, the ruff pre-check |
+| `report` | the shape check on a change job's closing JSON block, and its one repair prompt |
 | `jobs` | one job from start to its finish payload |
 | `main` | the claim loop and workspace cleanup |
 
@@ -38,6 +39,8 @@ It runs one job at a time and uses only the Python standard library.
 - **Change profile:**
   - The agent edits a copy of the checkout with no `.git` folder, using `--tools=Read,Grep,Glob,Edit,Write` and edits limited to the working copy (`Edit(./**)`, `Write(./**)`). No shell.
   - The worker then sends the changed files (path to base64, or null for a deletion) in the finish payload.
+  - The reply ends with a JSON block that Sazed turns into the PR description. If its shape is off, the worker resumes the session once to fix it; if that fails, the first reply goes through and Sazed uses its prose.
+- **Repo instructions:** `--setting-sources=user` doesn't load a repo's CLAUDE.md, so a fresh review or change session gets the checkout's CLAUDE.md and REVIEW.md (capped) at the top of its prompt.
   - The gateway's GitHub App commits them on `sazed/<job-id>` and opens the PR. Nothing here can push.
 - **Private repos:** they clone with a read-only, single-repo token that Sazed gets from the gateway for the job. git reads it through a credential helper that takes it from the environment, so it never appears in argv or `.git/config`. (An `http.extraheader` with Basic auth didn't work with GitHub's newer long tokens.)
 - **Hard limits per job:** a wall-clock timeout and a cap on tool calls. The worker kills the agent's whole process group past either one.

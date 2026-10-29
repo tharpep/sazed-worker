@@ -7,7 +7,8 @@ from . import agy, claude
 from .changes import changed_files
 from .config import JOBS_DIR, log
 from .lint import lint_changed, lint_prompt
-from .repo import prepare_repo, workspace
+from .repo import prepare_repo, repo_instructions, workspace
+from .report import repair_prompt, report_problem
 from .run import Run
 
 _EMPTY_RETRY_PROMPT = (
@@ -45,6 +46,8 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         prompt = job["prompt"]
         if job.get("resume_session_id") and not resume:
             prompt = f"(The earlier session could not be resumed; start fresh.)\n\n{prompt}"
+        if not resume:
+            prompt = repo_instructions(repo_dir) + prompt
         code = run.run(claude.command(job, prompt, resume), cwd)
         if job["profile"] == "change" and (run.result or {}).get("ok"):
             changes = changed_files(repo_dir, cwd)
@@ -61,6 +64,21 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
                 else:
                     run.result = first  # keep the original answer if the fix round failed
                 lint_meta["lint_left"] = lint_changed(repo_dir, cwd, changes)
+            # Sazed builds the PR description from the reply's JSON block: one repair round if
+            # its shape is off. A failed repair keeps the reply (Sazed falls back to its prose).
+            problem = report_problem((run.result or {}).get("response") or "")
+            if problem and not run.stop_reason and run.session_id:
+                log.info("job %s: result block unusable (%s), one repair round", job["id"],
+                         problem)
+                first = run.result
+                run.result = None
+                code = run.run(claude.command(job, repair_prompt(problem), run.session_id), cwd)
+                repaired = run.result or {}
+                if repaired.get("ok") and not report_problem(repaired.get("response") or ""):
+                    changes = changed_files(repo_dir, cwd)  # in case it edited anyway
+                else:
+                    run.result = first
+                lint_meta["result_repaired"] = run.result is not first
     else:
         return {"status": "failed", "error": f"agent '{job['agent']}' is not supported"}
 
