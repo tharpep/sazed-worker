@@ -28,7 +28,7 @@ BWRAP = "/usr/bin/bwrap"  # jails dependency installs and checks (jail.py)
 POETRY = "/usr/bin/poetry"
 PYTHONS_DIR = Path("/opt/uv-python")  # uv-managed Pythons for repos 3.14 can't install yet
 # Repos whose change jobs get the sandboxed shell (plans/10 P1.11): one repo until a live probe
-# passes, then all. (The first probe, 2026-10-29, found the sandbox failing to start; fixed.)
+# passes, then all. (Probes 1 and 2, 2026-10-29, found the sandbox failing to start; fixed.)
 SHELL_REPOS = frozenset({"tharpep/sazed"})
 POLL_SECONDS = 5
 FLUSH_SECONDS = 2

@@ -55,11 +55,18 @@ def _settings(root: Path, readable: list[Path]) -> str:
             "failIfUnavailable": True,
             "allowUnsandboxedCommands": False,
             "autoAllowBashIfSandboxed": False,
-            "network": {"allowedDomains": [], "strictAllowlist": True},
+            # allowAllUnixSockets skips the seccomp step that blocks Unix sockets: it can't start in
+            # CT 110's unprivileged container (anthropics/claude-code#81799, "apply-seccomp: write
+            # /proc/self/setgroups"). The folders holding every listening socket on CT 110 are
+            # hidden instead (denyRead below: all of /run, and postfix's spool), so commands can't
+            # reach systemd, D-Bus or sshd to run anything outside the sandbox. Abstract sockets
+            # stay out of reach: the sandbox has its own network namespace (none listen today).
+            "network": {"allowedDomains": [], "strictAllowlist": True, "allowAllUnixSockets": True},
             "filesystem": {
                 "allowWrite": [str(root / "cache")],
                 "denyRead": [
                     "~/.claude", "~/.claude.json", "~/.gemini", "~/.local", "~/.config", "~/jobs",
+                    "/run", "/var/spool/postfix",
                 ],
                 # Only the installed dependencies, never the workspace folder itself: re-allowing
                 # a folder that holds the working copy mounts it read-only over the writable copy,
