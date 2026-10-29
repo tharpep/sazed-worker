@@ -36,9 +36,15 @@ ALLOWED = [
     "Bash(tsc *)",
 ]
 _COMMANDS = "pytest, python -m pytest, ruff, bash -n, go test, go vet, gofmt -l, tsc"
+# Empty files Claude Code's sandbox creates in the working copy to keep sandboxed commands from
+# writing these names (seen in the first live probe, 2026-10-29). Not the agent's changes.
+_PLACEHOLDERS = {
+    ".gitmodules", ".gitconfig", ".mcp.json", ".npmrc", ".yarnrc", ".yarnrc.yml", "bunfig.toml",
+    "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
+}  # fmt: skip
 
 
-def _settings(root: Path) -> str:
+def _settings(root: Path, readable: list[Path]) -> str:
     return json.dumps({
         "sandbox": {
             "enabled": True,
@@ -51,7 +57,10 @@ def _settings(root: Path) -> str:
                 "denyRead": [
                     "~/.claude", "~/.claude.json", "~/.gemini", "~/.local", "~/.config", "~/jobs",
                 ],
-                "allowRead": [str(root)],  # this job's workspace, inside the denied ~/jobs
+                # Only the installed dependencies, never the workspace folder itself: re-allowing
+                # a folder that holds the working copy mounts it read-only over the writable copy,
+                # and the sandbox can't start (first live probe; reproduced with srt 0.0.81).
+                "allowRead": [str(path) for path in readable if path.exists()],
             },
             "credentials": {"envVars": [{"name": "CLAUDE_CODE_OAUTH_TOKEN", "mode": "deny"}]},
         }
@@ -71,6 +80,8 @@ def _pythons() -> list[str]:
 @dataclass
 class Shell:
     root: Path
+    repo_dir: Path
+    work: Path
     env: dict[str, str]
     settings: str
     ready: list[str]
@@ -95,6 +106,17 @@ class Shell:
 
     def meta(self) -> dict[str, Any]:
         return {"ready": self.ready, "skipped": self.skipped}
+
+    def tidy(self) -> None:
+        """Remove the sandbox's empty placeholder files from the working copy (top level), so
+        they never count as the agent's changes. Run after every agent run."""
+        for path in self.work.iterdir():
+            name = path.name
+            if not (name in _PLACEHOLDERS or name.startswith(".env")):
+                continue
+            if path.is_file() and not path.is_symlink() and path.stat().st_size == 0:
+                if not (self.repo_dir / name).exists():
+                    path.unlink()
 
     def cleanup(self) -> None:
         """Remove the installed dependencies and caches; the workspace may be kept for weeks."""
@@ -144,7 +166,10 @@ def prepare_shell(job: dict[str, Any], repo_dir: Path, work: Path) -> Shell | No
     env |= go_env(root) | {"GOPROXY": "off"}
     if path:
         env["PATH"] = ":".join([*path, agent_env("claude")["PATH"]])
-    return Shell(root, env, _settings(root), ready, skipped + sorted(checks.skipped), checks)
+    settings = _settings(root, [root / "venvs", root / "node_modules"])
+    return Shell(
+        root, repo_dir, work, env, settings, ready, skipped + sorted(checks.skipped), checks
+    )
 
 
 def _poetry(root: Path, work: Path, skipped: list[str]) -> str | None:

@@ -60,6 +60,8 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
             prompt = repo_instructions(repo_dir) + prompt
         try:
             code = run.run(claude.command(job, prompt, resume, shell), cwd, env)
+            if shell:
+                shell.tidy()
             if job["profile"] == "change" and (run.result or {}).get("ok"):
                 checks = Checks(repo_dir, cwd)
                 try:
@@ -75,6 +77,8 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
                         run.result = None
                         fix = claude.command(job, checks_prompt(issues), run.session_id, shell)
                         code = run.run(fix, cwd, env)
+                        if shell:
+                            shell.tidy()
                         if (run.result or {}).get("ok"):
                             changes = changed_files(repo_dir, cwd)
                         else:
@@ -94,6 +98,8 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
                     run.result = None
                     repair = claude.command(job, repair_prompt(problem), run.session_id, shell)
                     code = run.run(repair, cwd, env)
+                    if shell:
+                        shell.tidy()
                     repaired = run.result or {}
                     if repaired.get("ok") and not report_problem(repaired.get("response") or ""):
                         changes = changed_files(repo_dir, cwd)  # in case it edited anyway
