@@ -4,12 +4,16 @@ import uuid
 from typing import Any
 
 from . import agy, claude
+from .agent_process import JobFailed
 from .changes import changed_files
 from .config import JOBS_DIR, log
 from .lint import lint_changed, lint_prompt
 from .repo import prepare_repo, repo_instructions, workspace
 from .report import repair_prompt, report_problem
 from .run import Run
+
+# Stops that don't mean "give up": Sazed pauses a change job stopped this way (plans/10 P1.7).
+PAUSING_STOPS = ("timed_out", "tool_cap", "shutdown")
 
 _EMPTY_RETRY_PROMPT = (
     "Some tools you tried are not available here. Using only what you have already found, "
@@ -79,6 +83,12 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
                 else:
                     run.result = first
                 lint_meta["result_repaired"] = run.result is not first
+        if job["profile"] == "change" and run.stop_reason in PAUSING_STOPS:
+            # Sazed pauses the job and saves this as a draft PR, so a resume picks it up.
+            try:
+                changes = changed_files(repo_dir, cwd)
+            except JobFailed as e:
+                log.warning("job %s: couldn't collect the work so far: %s", job["id"], e)
     else:
         return {"status": "failed", "error": f"agent '{job['agent']}' is not supported"}
 
@@ -93,9 +103,13 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         "turns": result.get("turns"),
         "exit_code": code,
         "rate_limits": run.rate_limits or None,
+        "stop_reason": run.stop_reason,
     }
     base = {"agent_session_id": run.session_id, "meta": meta}
     partial = {"result": response or None}
+    if job.get("profile") == "change" and run.stop_reason in PAUSING_STOPS:
+        base["changes"] = changes
+        meta["changed_files"] = sorted(changes)
     if run.stop_reason in ("cancelled", "shutdown"):
         return base | {"status": "failed", "error": run.stop_reason}
     if run.stop_reason == "timed_out":
