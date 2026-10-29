@@ -65,6 +65,31 @@ def _rate_limit_reading(event: dict[str, Any]) -> dict[str, Any] | None:
     return {k: v for k, v in reading.items() if v is not None}
 
 
+# A reading this full before a silent exit is taken as the limit (plans/10 P1.2): long sessions
+# can exit 1 with no rejected event and no result (anthropics/claude-code#103820).
+_NEAR_LIMIT = 0.95
+
+
+def _limited(run: "Run", window: str | None, resets_at: Any) -> None:
+    """Pryce's plan refused the run: stop it as rate_limit (Sazed pauses it until the reset)."""
+    if run.rate_limited is None:
+        run.rate_limited = {"window": window, "resets_at": resets_at}
+    run.stop_reason = run.stop_reason or "rate_limit"
+
+
+def after_exit(run: "Run", code: int) -> None:
+    """The fallback for a session that died at the limit without saying so."""
+    if run.stop_reason or run.result is not None or code == 0:
+        return
+    last = run.rate_limits.get("last") or {}
+    windows = [(w.get("utilization") or 0, name, w.get("resets_at"))
+               for name, w in last.items() if isinstance(w, dict)]
+    full = max(windows, default=None)
+    if full and full[0] >= _NEAR_LIMIT:
+        _limited(run, full[1], full[2])
+        run.rate_limited["inferred"] = True
+
+
 def handle_event(run: "Run", event: dict[str, Any]) -> None:
     if isinstance(event.get("session_id"), str):
         run.session_id = event["session_id"]
@@ -72,12 +97,24 @@ def handle_event(run: "Run", event: dict[str, Any]) -> None:
         # First and last reading per job; the governor (plans/10 section 5) uses the change.
         run.rate_limits.setdefault("first", reading)
         run.rate_limits["last"] = reading
+        info = event.get("rate_limit_info") or {}
+        # rejected while extra usage covers it isn't a stop (Pryce has extra usage off today).
+        if info.get("status") == "rejected" and not info.get("isUsingOverage"):
+            _limited(run, info.get("rateLimitType"), info.get("resetsAt"))
     if event.get("type") == "assistant":
         message = event.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         for block in content if isinstance(content, list) else []:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 run.count_tool(str(block.get("name") or "?"))
+    if event.get("type") == "result" and event.get("api_error") == "usage_limit_reached":
+        last = run.rate_limits.get("last") or {}
+        window = max(
+            ((w.get("utilization") or 0, name, w.get("resets_at"))
+             for name, w in last.items() if isinstance(w, dict)),
+            default=(0, None, None),
+        )
+        _limited(run, window[1], window[2])
     if event.get("type") == "result":
         run.result = {
             "response": str(event.get("result") or "").strip(),

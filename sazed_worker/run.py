@@ -28,7 +28,10 @@ class Run:
         self.result: dict[str, Any] | None = None  # normalized: response, ok, error, usage, ...
         self.session_id: str | None = None
         self.rate_limits: dict[str, Any] = {}  # first and last plan-usage reading (Claude only)
-        self.stop_reason: str | None = None  # cancelled | timed_out | tool_cap | shutdown
+        # Set when Pryce's plan refused the run: {"window", "resets_at"} (plans/10 P1.2).
+        self.rate_limited: dict[str, Any] | None = None
+        # cancelled | timed_out | tool_cap | shutdown | rate_limit
+        self.stop_reason: str | None = None
         self.stderr = ""
         self._pending: list[dict[str, Any]] = []
         self._lock = threading.Lock()
@@ -103,7 +106,11 @@ class Run:
                     if saved is not None:
                         self._queue(saved)
                 self._flush()
-            return proc.wait()
+            code = proc.wait()
+            after_exit = getattr(agent, "after_exit", None)
+            if after_exit:
+                after_exit(self, code)
+            return code
         finally:
             kill_group(proc)  # also reaps background children the agent left behind
             proc.stdout.close()
