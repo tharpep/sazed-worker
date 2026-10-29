@@ -27,9 +27,10 @@ COREPACK = "/usr/bin/corepack"
 BWRAP = "/usr/bin/bwrap"  # jails dependency installs and checks (jail.py)
 POETRY = "/usr/bin/poetry"
 PYTHONS_DIR = Path("/opt/uv-python")  # uv-managed Pythons for repos 3.14 can't install yet
-# Repos whose change jobs get the sandboxed shell (plans/10 P1.11): one repo until a live probe
-# passes, then all. (Probes 1 and 2, 2026-10-29, found the sandbox failing to start; fixed.)
-SHELL_REPOS = frozenset({"tharpep/sazed"})
+# Repos whose change jobs get the sandboxed shell (plans/10 P1.11). Off: the third live probe
+# (2026-10-29) found Claude Code's sandbox on CT 110 letting commands write to the agent's home
+# and reach sockets under /run. Tests move to the worker's own jail instead.
+SHELL_REPOS: frozenset[str] = frozenset()
 POLL_SECONDS = 5
 FLUSH_SECONDS = 2
 MAX_PENDING_EVENTS = 2000
