@@ -110,3 +110,28 @@ def prepare_repo(job: dict[str, Any], workspace: Path) -> tuple[Path, Path, str 
     tmp.rename(dest)
     cwd = _working_copy(dest, workspace) if change else dest
     return dest, cwd, None  # a fresh checkout has no session to resume
+
+
+# The worker runs Claude Code with --setting-sources=user, which doesn't load a repo's CLAUDE.md,
+# so the repo's conventions go in the prompt instead. kelsier's CLAUDE.md is about 31 KB.
+_INSTRUCTION_FILES = (("CLAUDE.md", 40_000), ("REVIEW.md", 12_000))
+
+
+def repo_instructions(repo_dir: Path) -> str:
+    """The repo's CLAUDE.md and REVIEW.md as a preamble for a fresh session's prompt, or ""."""
+    parts = []
+    for name, cap in _INSTRUCTION_FILES:
+        path = repo_dir / name
+        if path.is_symlink() or not path.is_file():  # a symlink could point outside the repo
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace").strip()
+        if len(text) > cap:
+            text = f"{text[:cap]}\n\n[{name} cut at {cap} characters]"
+        if text:
+            parts.append(f"<{name}>\n{text}\n</{name}>")
+    if not parts:
+        return ""
+    return (
+        "The repository's own instructions, from its default branch. Follow them where they "
+        "don't conflict with the task below.\n\n" + "\n\n".join(parts) + "\n\n---\n\n"
+    )
