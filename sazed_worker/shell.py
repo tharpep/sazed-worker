@@ -37,8 +37,12 @@ ALLOWED = [
 ]
 _COMMANDS = "pytest, python -m pytest, ruff, bash -n, go test, go vet, gofmt -l, tsc"
 # Empty files Claude Code's sandbox creates in the working copy to keep sandboxed commands from
-# writing these names (seen in the first live probe, 2026-10-29). Not the agent's changes.
+# writing these names: the exact list the first live probe saw (2026-10-29), plus the two its
+# errors named. Not the agent's changes. Exact names only, so an agent's own empty .env.example
+# or __init__.py is never touched.
 _PLACEHOLDERS = {
+    ".env", ".env.local", ".env.development", ".env.development.local", ".env.production",
+    ".env.production.local", ".env.test", ".env.test.local",
     ".gitmodules", ".gitconfig", ".mcp.json", ".npmrc", ".yarnrc", ".yarnrc.yml", "bunfig.toml",
     "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock",
 }  # fmt: skip
@@ -109,10 +113,11 @@ class Shell:
 
     def tidy(self) -> None:
         """Remove the sandbox's empty placeholder files from the working copy (top level), so
-        they never count as the agent's changes. Run after every agent run."""
+        they never count as the agent's changes. Run after every agent run. Only a file with a
+        placeholder name that is empty and absent from the untouched checkout goes."""
         for path in self.work.iterdir():
             name = path.name
-            if not (name in _PLACEHOLDERS or name.startswith(".env")):
+            if name not in _PLACEHOLDERS:
                 continue
             if path.is_file() and not path.is_symlink() and path.stat().st_size == 0:
                 if not (self.repo_dir / name).exists():
