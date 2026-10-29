@@ -19,7 +19,8 @@ Modules:
 - agent_process: running children as the agent user, and killing their process groups
 - agy, claude: each CLI's command line and how its event stream is read
 - run: one agent process, streamed to Sazed under the timeout and tool-call cap
-- repo, changes, lint: checkouts, the changed-file list, and the ruff pre-check
+- repo, changes, checks: checkouts, the changed-file list, and the checks run on a change
+  job's edits (ruff, bash -n, gofmt/go vet, tsc)
 - jobs: one job from start to finish payload
 - main: the claim loop
 """
