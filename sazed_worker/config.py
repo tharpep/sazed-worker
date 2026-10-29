@@ -18,6 +18,12 @@ JOBS_DIR = AGENT_HOME / "jobs"
 AGY = str(AGENT_HOME / ".local/bin/agy")
 CLAUDE = str(AGENT_HOME / ".local/bin/claude")
 RUFF = "/usr/local/bin/ruff"  # lint pre-check for change jobs (run by the worker, not the agent)
+# The other checks the worker runs on change jobs (checks.py); install-tools.sh puts them here.
+BASH = "/bin/bash"
+GO = "/usr/bin/go"
+GOFMT = "/usr/bin/gofmt"
+NPM = "/usr/bin/npm"
+COREPACK = "/usr/bin/corepack"
 POLL_SECONDS = 5
 FLUSH_SECONDS = 2
 MAX_PENDING_EVENTS = 2000

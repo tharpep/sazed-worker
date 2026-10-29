@@ -21,7 +21,7 @@ It runs one job at a time and uses only the Python standard library.
 | `agent_process` | running children as the agent user, killing their process groups, `JobFailed` |
 | `agy`, `claude` | each CLI's command line (and Claude's profiles) and how its event stream is read |
 | `run` | one agent process, streamed to Sazed under the timeout and tool-call cap |
-| `repo`, `changes`, `lint` | workspaces and checkouts (and the repo's CLAUDE.md/REVIEW.md for the prompt), the changed-file list, the ruff pre-check |
+| `repo`, `changes`, `checks` | workspaces and checkouts (and the repo's CLAUDE.md/REVIEW.md for the prompt), the changed-file list, the checks on a change job's edits |
 | `report` | the shape check on a change job's closing JSON block, and its one repair prompt |
 | `jobs` | one job from start to its finish payload |
 | `main` | the claim loop and workspace cleanup |
@@ -38,6 +38,14 @@ It runs one job at a time and uses only the Python standard library.
 - **Unit gotcha:** no explicit `User=root` in the unit. With `NoNewPrivileges=yes`, systemd then drops CAP_SETUID and the privilege drop fails.
 - **Change profile:**
   - The agent edits a copy of the checkout with no `.git` folder, using `--tools=Read,Grep,Glob,Edit,Write` and edits limited to the working copy (`Edit(./**)`, `Write(./**)`). No shell.
+  - **Checks:** before the PR, the worker runs fixed commands as the `agent` user on what the job changed. A finding counts only if the edit introduced it:
+    - ruff on changed lines, with the repo's own config
+    - `bash -n` on shell scripts
+    - `gofmt`, applied to Go files that were formatted before
+    - `go vet` (`GOTOOLCHAIN=local`, `GOFLAGS=-mod=readonly`), compared with the untouched checkout
+    - `tsc --noEmit`, after `pnpm install --frozen-lockfile --ignore-scripts` (through corepack) or `npm ci --ignore-scripts` in the workspace folder, also compared with the untouched checkout
+
+    Findings go into one fix round. A missing tool or a failed install skips that check and is named in `meta.checks_skipped`. `install-tools.sh` installs Go, Node, npm, corepack, bubblewrap and socat on CT 110.
   - The worker then sends the changed files (path to base64, or null for a deletion) in the finish payload.
   - The reply ends with a JSON block that Sazed turns into the PR description. If its shape is off, the worker resumes the session once to fix it; if that fails, the first reply goes through and Sazed uses its prose.
   - A change job stopped by its timeout, the tool cap or a worker shutdown still sends the files it changed so far, with `meta.stop_reason`. Sazed pauses the job and saves them as a draft PR, and a resume continues in the same working copy.

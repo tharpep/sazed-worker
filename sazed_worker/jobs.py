@@ -6,8 +6,8 @@ from typing import Any
 from . import agy, claude
 from .agent_process import JobFailed
 from .changes import changed_files
+from .checks import Checks, checks_prompt
 from .config import JOBS_DIR, log
-from .lint import lint_changed, lint_prompt
 from .repo import prepare_repo, repo_instructions, workspace
 from .report import repair_prompt, report_problem
 from .run import Run
@@ -54,20 +54,28 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
             prompt = repo_instructions(repo_dir) + prompt
         code = run.run(claude.command(job, prompt, resume), cwd)
         if job["profile"] == "change" and (run.result or {}).get("ok"):
-            changes = changed_files(repo_dir, cwd)
-            issues = lint_changed(repo_dir, cwd, changes)
-            lint_meta = {"lint_found": len(issues)}
-            if issues and not run.stop_reason and run.session_id:
-                log.info("job %s: %d lint issue(s) on changed lines, one fix round", job["id"],
-                         len(issues))
-                first = run.result
-                run.result = None
-                code = run.run(claude.command(job, lint_prompt(issues), run.session_id), cwd)
-                if (run.result or {}).get("ok"):
+            checks = Checks(repo_dir, cwd)
+            try:
+                changes = changed_files(repo_dir, cwd)
+                issues = checks.run(changes)
+                if checks.formatted:
+                    changes = changed_files(repo_dir, cwd)  # gofmt rewrote some files
+                lint_meta = {"lint_found": len(issues)}
+                if issues and not run.stop_reason and run.session_id:
+                    log.info("job %s: %d check finding(s) in its changes, one fix round",
+                             job["id"], len(issues))
+                    first = run.result
+                    run.result = None
+                    code = run.run(claude.command(job, checks_prompt(issues), run.session_id), cwd)
+                    if (run.result or {}).get("ok"):
+                        changes = changed_files(repo_dir, cwd)
+                    else:
+                        run.result = first  # keep the original answer if the fix round failed
+                    lint_meta["lint_left"] = checks.run(changes)
                     changes = changed_files(repo_dir, cwd)
-                else:
-                    run.result = first  # keep the original answer if the fix round failed
-                lint_meta["lint_left"] = lint_changed(repo_dir, cwd, changes)
+                lint_meta |= checks.meta()
+            finally:
+                checks.cleanup()
             # Sazed builds the PR description from the reply's JSON block: one repair round if
             # its shape is off. A failed repair keeps the reply (Sazed falls back to its prose).
             problem = report_problem((run.result or {}).get("response") or "")
