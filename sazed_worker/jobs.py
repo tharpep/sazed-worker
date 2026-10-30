@@ -1,6 +1,7 @@
 """One job from start to the finish payload Sazed receives."""
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from . import agy, claude
@@ -13,8 +14,9 @@ from .report import repair_prompt, report_problem
 from .run import Run
 from .tests import TestRun
 
-# Stops that don't mean "give up": Sazed pauses a change job stopped this way (plans/10 P1.7).
-PAUSING_STOPS = ("timed_out", "tool_cap", "shutdown")
+# Stops that don't mean "give up": Sazed pauses a change job stopped this way (plans/10 P1.7),
+# and a rate_limit one resumes on its own after the reset (P1.2).
+PAUSING_STOPS = ("timed_out", "tool_cap", "shutdown", "rate_limit")
 
 _EMPTY_RETRY_PROMPT = (
     "Some tools you tried are not available here. Using only what you have already found, "
@@ -119,6 +121,7 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         "turns": result.get("turns"),
         "exit_code": code,
         "rate_limits": run.rate_limits or None,
+        "rate_limited": run.rate_limited,
         "stop_reason": run.stop_reason,
     }
     base = {"agent_session_id": run.session_id, "meta": meta}
@@ -130,6 +133,14 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         return base | {"status": "failed", "error": run.stop_reason}
     if run.stop_reason == "timed_out":
         return base | partial | {"status": "timed_out", "error": "hit the job timeout"}
+    if run.stop_reason == "rate_limit":
+        limited = run.rate_limited or {}
+        window = (limited.get("window") or "usage").replace("_", " ")
+        error = f"hit Pryce's {window} plan limit"
+        if isinstance(limited.get("resets_at"), (int, float)):
+            reset = datetime.fromtimestamp(limited["resets_at"], UTC).strftime("%Y-%m-%d %H:%M")
+            error += f"; it resets at {reset} UTC"
+        return base | partial | {"status": "failed", "error": error}
     if run.stop_reason == "tool_cap":
         return base | partial | {"status": "failed",
                                  "error": f"stopped at the {run.max_tools}-tool-call cap"}
