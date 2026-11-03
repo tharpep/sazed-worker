@@ -101,9 +101,20 @@ def prepare_repo(job: dict[str, Any], workspace: Path) -> tuple[Path, Path, str 
     token = job.get("clone_token") or None
     if token:
         extra_secrets.add(token)
+    params = job.get("params") or {}
+    pr_number = params.get("pr_number")
+    branch = params.get("branch")
     try:
-        git("clone", "--depth", "50", "--single-branch", f"https://github.com/{repo}.git",
-            str(tmp), token=token)
+        if pr_number:
+            git("clone", "--depth", "50", f"https://github.com/{repo}.git", str(tmp), token=token)
+            git("fetch", "origin", f"pull/{pr_number}/head:pr-{pr_number}", cwd=tmp, token=token)
+            git("checkout", f"pr-{pr_number}", cwd=tmp)
+        elif branch and branch not in ("main", "master"):
+            git("clone", "--depth", "50", "--branch", branch, f"https://github.com/{repo}.git",
+                str(tmp), token=token)
+        else:
+            git("clone", "--depth", "50", "--single-branch", f"https://github.com/{repo}.git",
+                str(tmp), token=token)
     except JobFailed:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
@@ -112,9 +123,14 @@ def prepare_repo(job: dict[str, Any], workspace: Path) -> tuple[Path, Path, str 
     return dest, cwd, None  # a fresh checkout has no session to resume
 
 
-# The worker runs Claude Code with --setting-sources=user, which doesn't load a repo's CLAUDE.md,
-# so the repo's conventions go in the prompt instead. kelsier's CLAUDE.md is about 31 KB.
-_INSTRUCTION_FILES = (("CLAUDE.md", 40_000), ("REVIEW.md", 12_000))
+# The worker runs agents with isolated settings that don't auto-load a repo's instructions,
+# so the repo's conventions go in the prompt instead.
+_INSTRUCTION_FILES = (
+    ("GEMINI.md", 40_000),
+    ("AGENTS.md", 40_000),
+    ("CLAUDE.md", 40_000),
+    ("REVIEW.md", 12_000),
+)
 
 
 def repo_instructions(repo_dir: Path) -> str:
