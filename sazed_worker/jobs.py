@@ -34,6 +34,8 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         target_dir = ws
         prompt = job["prompt"]
         if job.get("profile") == "review":
+            # Read-only rests on agy's print mode: it refuses write_file and run_command unless
+            # --dangerously-skip-permissions is passed, which agy.command never does (agy 1.4.12).
             repo_dir, target_dir, resume = prepare_repo(job, ws)
             if job.get("resume_session_id") and not resume:
                 prompt = f"(The earlier session could not be resumed; start fresh.)\n\n{prompt}"

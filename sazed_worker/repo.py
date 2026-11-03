@@ -123,14 +123,11 @@ def prepare_repo(job: dict[str, Any], workspace: Path) -> tuple[Path, Path, str 
     return dest, cwd, None  # a fresh checkout has no session to resume
 
 
-# The worker runs agents with isolated settings that don't auto-load a repo's instructions,
-# so the repo's conventions go in the prompt instead.
-_INSTRUCTION_FILES = (
-    ("GEMINI.md", 40_000),
-    ("AGENTS.md", 40_000),
-    ("CLAUDE.md", 40_000),
-    ("REVIEW.md", 12_000),
-)
+# Neither agent loads CLAUDE.md here: Claude Code runs with --setting-sources=user, and agy reads
+# only AGENTS.md and GEMINI.md from the checkout (checked headless on agy 1.4.12). So CLAUDE.md and
+# REVIEW.md go in the prompt, and AGENTS.md or GEMINI.md would be duplicates for agy.
+# kelsier's CLAUDE.md is about 31 KB.
+_INSTRUCTION_FILES = (("CLAUDE.md", 40_000), ("REVIEW.md", 12_000))
 
 
 def repo_instructions(repo_dir: Path) -> str:
