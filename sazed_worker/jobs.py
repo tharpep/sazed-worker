@@ -33,10 +33,20 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
 
     if job["agent"] == "agy":
         resume = job.get("resume_session_id")
-        if resume and job.get("parent_id"):
+        target_dir = ws
+        prompt = job["prompt"]
+        if job.get("profile") == "review":
+            # Read-only rests on agy's print mode: it refuses write_file and run_command unless
+            # --dangerously-skip-permissions is passed, which agy.command never does (agy 1.4.12).
+            repo_dir, target_dir, resume = prepare_repo(job, ws)
+            if job.get("resume_session_id") and not resume:
+                prompt = f"(The earlier session could not be resumed; start fresh.)\n\n{prompt}"
+            if not resume:
+                prompt = repo_instructions(repo_dir) + prompt
+        elif resume and job.get("parent_id"):
             parent = JOBS_DIR / str(uuid.UUID(str(job["parent_id"])))
-            ws = parent if parent.is_dir() else ws
-        code = run.run(agy.command(job, job["prompt"], resume), ws)
+            target_dir = parent if parent.is_dir() else ws
+        code = run.run(agy.command(job, prompt, resume), target_dir)
         result = run.result or {}
         # agy ends with an empty answer when its last step was a tool headless mode refused.
         # Resume the same conversation once and ask it to answer with what it has.
@@ -45,7 +55,7 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
             log.info("job %s: empty answer after denied %s, resuming once", job["id"],
                      result.get("denied"))
             run.result = None
-            code = run.run(agy.command(job, _EMPTY_RETRY_PROMPT, run.session_id), ws)
+            code = run.run(agy.command(job, _EMPTY_RETRY_PROMPT, run.session_id), target_dir)
     elif job["agent"] == "claude":
         if job["profile"] not in claude.PROFILES:
             return {"status": "failed", "error": f"profile '{job['profile']}' is not supported yet"}
