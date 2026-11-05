@@ -5,7 +5,7 @@ package code; ruff and bash -n don't, but share the path) run before or after th
 network. They run as the agent user inside bubblewrap, so they can't read the agent user's
 home: the Claude session data in ~/.claude, agy's login in ~/.gemini, other jobs' workspaces.
 They see a read-only system, their own workspace (writable) and a private /tmp, and no other
-processes. The OAuth token never reaches them (agent_env gives it only to Claude).
+processes. The OAuth token never reaches them (only the Claude adapter adds it to its own env).
 
 The repo's tests (tests.py) run code the agent just wrote, so they get the untrusted mode: the
 workspace read-only except a scratch copy and a throwaway cache (no cache a later step reads can be
@@ -66,7 +66,7 @@ def run_jailed(
         "--chdir", str(cwd),
         "--",
     ]  # fmt: skip
-    full_env = agent_env("check") | {"HOME": str(home)} | (env or {})
+    full_env = agent_env() | {"HOME": str(home)} | (env or {})
     try:
         proc = subprocess.Popen(
             [*jail, *cmd],

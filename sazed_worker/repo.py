@@ -26,7 +26,7 @@ def git(*args: str, cwd: Path | None = None, timeout: int = 180,
     A token (read-only, one repo, from the gateway's GitHub App) goes in via environment config,
     not argv, so it never shows in a process listing.
     """
-    env = agent_env("git")
+    env = agent_env()
     if token:
         # A credential helper reading the token from the environment. (An http.extraheader with
         # Basic auth was ignored for GitHub's newer long installation tokens.) Nothing is written
@@ -130,10 +130,13 @@ def prepare_repo(job: dict[str, Any], workspace: Path) -> tuple[Path, Path, str 
 _INSTRUCTION_FILES = (("CLAUDE.md", 40_000), ("REVIEW.md", 12_000))
 
 
-def repo_instructions(repo_dir: Path) -> str:
-    """The repo's CLAUDE.md and REVIEW.md as a preamble for a fresh session's prompt, or ""."""
+def repo_instructions(repo_dir: Path, reads_itself: tuple[str, ...] = ()) -> str:
+    """The repo's CLAUDE.md and REVIEW.md as a preamble for a fresh session's prompt, or "".
+    Files the agent loads from the checkout on its own (its READS_CONTEXT) are left out."""
     parts = []
     for name, cap in _INSTRUCTION_FILES:
+        if name in reads_itself:
+            continue
         path = repo_dir / name
         if path.is_symlink() or not path.is_file():  # a symlink could point outside the repo
             continue

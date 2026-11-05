@@ -1,12 +1,13 @@
 """Claude Code (`claude -p`): profiles, its command line, and how its stream-json is read."""
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .agent_process import safe_arg
-from .config import CLAUDE, TOOL_RESULT_PREVIEW
+from ..agent_process import safe_arg
+from ..config import CLAUDE, CLAUDE_TOKEN, TOOL_RESULT_PREVIEW
 
 if TYPE_CHECKING:
-    from .run import Run
+    from ..run import Run
 
 # Which built-in tools exist per profile (--tools), which are pre-approved (--allowedTools),
 # and which reads are refused outright. With --permission-mode dontAsk anything not pre-approved
@@ -20,6 +21,22 @@ PROFILES: dict[str, tuple[str, list[str]]] = {
     "change": ("Read,Grep,Glob,Edit,Write",
                ["Read", "Grep", "Glob", "Edit(./**)", "Write(./**)"]),
 }
+
+NAME = "claude"
+CAPABILITIES = frozenset(PROFILES)
+RESUMES = True
+TOOL_POLICY = "allowlist"  # --tools and --allowedTools per profile; dontAsk refuses the rest
+# --setting-sources=user: Claude Code loads none of the checkout's CLAUDE.md or AGENTS.md here.
+READS_CONTEXT: tuple[str, ...] = ()
+
+
+def available() -> bool:
+    return Path(CLAUDE).exists() and bool(CLAUDE_TOKEN)
+
+
+def extra_env() -> dict[str, str]:
+    """Only Claude's process gets the OAuth token; git and the jailed checks never do."""
+    return {"CLAUDE_CODE_OAUTH_TOKEN": CLAUDE_TOKEN, "DISABLE_AUTOUPDATER": "1"}
 
 
 def command(job: dict[str, Any], prompt: str, resume: str | None) -> list[str]:

@@ -4,7 +4,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from . import agy, claude
+from .adapters import agy, claude
 from .agent_process import JobFailed
 from .changes import changed_files
 from .checks import Checks, checks_prompt
@@ -42,7 +42,7 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
             if job.get("resume_session_id") and not resume:
                 prompt = f"(The earlier session could not be resumed; start fresh.)\n\n{prompt}"
             if not resume:
-                prompt = repo_instructions(repo_dir) + prompt
+                prompt = repo_instructions(repo_dir, agy.READS_CONTEXT) + prompt
         elif resume and job.get("parent_id"):
             parent = JOBS_DIR / str(uuid.UUID(str(job["parent_id"])))
             target_dir = parent if parent.is_dir() else ws
@@ -57,14 +57,14 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
             run.result = None
             code = run.run(agy.command(job, _EMPTY_RETRY_PROMPT, run.session_id), target_dir)
     elif job["agent"] == "claude":
-        if job["profile"] not in claude.PROFILES:
+        if job["profile"] not in claude.CAPABILITIES:
             return {"status": "failed", "error": f"profile '{job['profile']}' is not supported yet"}
         repo_dir, cwd, resume = prepare_repo(job, ws)
         prompt = job["prompt"]
         if job.get("resume_session_id") and not resume:
             prompt = f"(The earlier session could not be resumed; start fresh.)\n\n{prompt}"
         if not resume:
-            prompt = repo_instructions(repo_dir) + prompt
+            prompt = repo_instructions(repo_dir, claude.READS_CONTEXT) + prompt
         code = run.run(claude.command(job, prompt, resume), cwd)
         if job["profile"] == "change" and (run.result or {}).get("ok"):
             # The worker's checks and the repo's own tests (both run by the worker; the agent has

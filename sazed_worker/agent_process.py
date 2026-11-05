@@ -6,15 +6,16 @@ import subprocess
 import time
 from typing import Any
 
-from .config import AGENT_HOME, AGENT_USER, CLAUDE_TOKEN, SAFE_ARG_RE
+from .config import AGENT_HOME, AGENT_USER, SAFE_ARG_RE
 
 
 class JobFailed(Exception):
     """A job that can't run (bad repo, clone failure, unsupported profile, bad input)."""
 
 
-def agent_env(agent: str) -> dict[str, str]:
-    """A minimal environment for an agent process (no worker key; Claude gets its own token)."""
+def agent_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """A minimal environment for a child process: no worker key and no token, unless the
+    adapter that starts it adds its own (only Claude's does)."""
     env = {
         "HOME": str(AGENT_HOME),
         "USER": AGENT_USER,
@@ -22,10 +23,7 @@ def agent_env(agent: str) -> dict[str, str]:
         "LANG": os.environ.get("LANG", "C.UTF-8"),
         "GIT_TERMINAL_PROMPT": "0",
     }
-    if agent == "claude":
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = CLAUDE_TOKEN
-        env["DISABLE_AUTOUPDATER"] = "1"
-    return env
+    return env | (extra or {})
 
 
 def as_agent() -> dict[str, Any]:

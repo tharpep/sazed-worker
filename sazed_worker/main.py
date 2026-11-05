@@ -5,15 +5,12 @@ import shutil
 import signal
 import socket
 import time
-from pathlib import Path
 from typing import Any
 
+from . import adapters
 from .agent_process import JobFailed
 from .config import (
     AGENT_USER,
-    AGY,
-    CLAUDE,
-    CLAUDE_TOKEN,
     JOBS_DIR,
     POLL_SECONDS,
     SAZED_URL,
@@ -28,12 +25,7 @@ from .scrub import extra_secrets
 
 
 def _agents() -> list[str]:
-    agents = []
-    if Path(AGY).exists():
-        agents.append("agy")
-    if Path(CLAUDE).exists() and CLAUDE_TOKEN:
-        agents.append("claude")
-    return agents
+    return adapters.available()
 
 
 def _cleanup_workspaces() -> None:
