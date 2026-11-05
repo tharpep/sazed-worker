@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import agy, claude
+from . import adapters
 from .agent_process import agent_env, as_agent, kill_group
 from .config import DEADLINE_GRACE_S, FLUSH_SECONDS, MAX_PENDING_EVENTS, log, stop
 from .sazed_api import post
@@ -65,14 +65,14 @@ class Run:
             self.stop_reason = self.stop_reason or "tool_cap"
 
     def run(self, cmd: list[str], cwd: Path) -> int:
-        agent = claude if self.job["agent"] == "claude" else agy
+        agent = adapters.ADAPTERS[self.job["agent"]]  # run_job already refused unknown agents
         self.deadline = (
             time.monotonic() + self.timeout_s + DEADLINE_GRACE_S
         )  # fresh budget per process
         proc = subprocess.Popen(
             cmd,
             cwd=cwd,
-            env=agent_env(self.job["agent"]),
+            env=agent_env(agent.extra_env()),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

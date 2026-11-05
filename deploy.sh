@@ -14,13 +14,15 @@ SSH_KEY="$HOME/.ssh/proxmox_media"
 VMID=110
 
 python -m compileall -q worker.py sazed_worker
-tar -cf - worker.py sazed_worker/*.py sazed-worker.service | ssh -i "$SSH_KEY" -o BatchMode=yes \
+tar -cf - worker.py sazed_worker/*.py sazed_worker/adapters/*.py sazed-worker.service \
+  | ssh -i "$SSH_KEY" -o BatchMode=yes \
   "$PROXMOX" "pct exec $VMID -- sh -c 'set -e
 mkdir -p /opt/sazed-worker
 rm -rf /opt/sazed-worker/sazed_worker
 tar --no-same-owner -xf - -C /opt/sazed-worker
-chmod 755 /opt/sazed-worker/sazed_worker
-chmod 644 /opt/sazed-worker/worker.py /opt/sazed-worker/sazed_worker/*.py
+chmod 755 /opt/sazed-worker/sazed_worker /opt/sazed-worker/sazed_worker/adapters
+chmod 644 /opt/sazed-worker/worker.py /opt/sazed-worker/sazed_worker/*.py \
+  /opt/sazed-worker/sazed_worker/adapters/*.py
 mv /opt/sazed-worker/sazed-worker.service /etc/systemd/system/sazed-worker.service
 systemctl daemon-reload
 systemctl enable --quiet sazed-worker

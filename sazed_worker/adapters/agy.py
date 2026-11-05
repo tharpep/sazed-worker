@@ -1,12 +1,29 @@
 """Antigravity (`agy`): its command line and how its stream-json events are read."""
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .agent_process import safe_arg
-from .config import AGY
+from ..agent_process import safe_arg
+from ..config import AGY
 
 if TYPE_CHECKING:
-    from .run import Run
+    from ..run import Run
+
+NAME = "agy"
+CAPABILITIES = frozenset({"research", "review"})
+RESUMES = True
+# No tool list: print mode refuses write_file and run_command unless
+# --dangerously-skip-permissions is passed, which command() never does (agy 1.4.12).
+TOOL_POLICY = "print_mode_denial"
+READS_CONTEXT = ("AGENTS.md", "GEMINI.md")  # loaded from the checkout on its own (agy 1.4.12)
+
+
+def available() -> bool:
+    return Path(AGY).exists()
+
+
+def extra_env() -> dict[str, str]:
+    return {}
 
 
 def command(job: dict[str, Any], prompt: str, resume: str | None) -> list[str]:
