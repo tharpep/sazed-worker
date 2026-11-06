@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from .adapters import agy, claude
@@ -10,6 +11,7 @@ from .changes import changed_files
 from .check_result import check_result
 from .checks import Checks, checks_prompt
 from .config import JOBS_DIR, log
+from .pr_checks import pr_checks
 from .repo import prepare_repo, repo_instructions, workspace
 from .report import repair_prompt, report_problem
 from .run import Run
@@ -23,6 +25,20 @@ _EMPTY_RETRY_PROMPT = (
     "Some tools you tried are not available here. Using only what you have already found, "
     "answer the original question now in the requested format, with sources."
 )
+
+
+def _review_checks(
+    job: dict[str, Any], run: Run, repo_dir: Path, ws: Path
+) -> tuple[str, dict[str, Any]]:
+    """A PR review starts with the worker's checks and tests on the PR; any other job, none."""
+    if job.get("profile") != "review" or not (job.get("params") or {}).get("pr_number"):
+        return "", {}
+    with run.heartbeat():
+        try:
+            return pr_checks(job, repo_dir, ws)
+        except Exception as e:  # the checks only add to a review; never let them fail it
+            log.exception("job %s: PR checks crashed", job["id"])
+            return "", {"pr_checks_skipped": f"worker error: {type(e).__name__}"}
 
 
 def run_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -43,7 +59,8 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
             if job.get("resume_session_id") and not resume:
                 prompt = f"(The earlier session could not be resumed; start fresh.)\n\n{prompt}"
             if not resume:
-                prompt = repo_instructions(repo_dir, agy.READS_CONTEXT) + prompt
+                section, lint_meta = _review_checks(job, run, repo_dir, ws)
+                prompt = repo_instructions(repo_dir, agy.READS_CONTEXT) + section + prompt
         elif resume and job.get("parent_id"):
             parent = JOBS_DIR / str(uuid.UUID(str(job["parent_id"])))
             target_dir = parent if parent.is_dir() else ws
@@ -65,38 +82,42 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         if job.get("resume_session_id") and not resume:
             prompt = f"(The earlier session could not be resumed; start fresh.)\n\n{prompt}"
         if not resume:
-            prompt = repo_instructions(repo_dir, claude.READS_CONTEXT) + prompt
+            section, lint_meta = _review_checks(job, run, repo_dir, ws)
+            prompt = repo_instructions(repo_dir, claude.READS_CONTEXT) + section + prompt
         code = run.run(claude.command(job, prompt, resume), cwd)
         if job["profile"] == "change" and (run.result or {}).get("ok"):
             # The worker's checks and the repo's own tests (both run by the worker; the agent has
             # no shell) feed one fix round.
             checks, tests = Checks(repo_dir, cwd), TestRun(repo_dir, cwd)
-            try:
-                changes = changed_files(repo_dir, cwd)
-                issues = checks.run(changes)
-                if checks.formatted:
-                    changes = changed_files(repo_dir, cwd)  # gofmt rewrote some files
-                failures = tests.run() or []
-                lint_meta = {"lint_found": len(issues), "tests_failing": len(failures)}
-                if (issues or failures) and not run.stop_reason and run.session_id:
-                    log.info("job %s: %d check finding(s), %d new test failure(s), one fix round",
-                             job["id"], len(issues), len(failures))
-                    first = run.result
-                    run.result = None
-                    fix = claude.command(job, checks_prompt(issues + failures), run.session_id)
-                    code = run.run(fix, cwd)
-                    if (run.result or {}).get("ok"):
-                        changes = changed_files(repo_dir, cwd)
-                    else:
-                        run.result = first  # keep the original answer if the fix round failed
-                    lint_meta["lint_left"] = checks.run(changes)
-                    if failures:
-                        tests.run()
+            with run.heartbeat():
+                try:
                     changes = changed_files(repo_dir, cwd)
-                lint_meta |= checks.meta() | {"tests": tests.meta()}
-            finally:
-                checks.cleanup()
-                tests.cleanup()
+                    issues = checks.run(changes)
+                    if checks.formatted:
+                        changes = changed_files(repo_dir, cwd)  # gofmt rewrote some files
+                    failures = tests.run() or []
+                    lint_meta = {"lint_found": len(issues), "tests_failing": len(failures)}
+                    if (issues or failures) and not run.stop_reason and run.session_id:
+                        log.info(
+                            "job %s: %d check finding(s), %d new test failure(s), one fix round",
+                            job["id"], len(issues), len(failures),
+                        )
+                        first = run.result
+                        run.result = None
+                        fix = claude.command(job, checks_prompt(issues + failures), run.session_id)
+                        code = run.run(fix, cwd)
+                        if (run.result or {}).get("ok"):
+                            changes = changed_files(repo_dir, cwd)
+                        else:
+                            run.result = first  # keep the original answer if the fix round failed
+                        lint_meta["lint_left"] = checks.run(changes)
+                        if failures:
+                            tests.run()
+                        changes = changed_files(repo_dir, cwd)
+                    lint_meta |= checks.meta() | {"tests": tests.meta()}
+                finally:
+                    checks.cleanup()
+                    tests.cleanup()
             # Sazed builds the PR description from the reply's JSON block: one repair round if
             # its shape is off. A failed repair keeps the reply (Sazed falls back to its prose).
             problem = report_problem((run.result or {}).get("response") or "")

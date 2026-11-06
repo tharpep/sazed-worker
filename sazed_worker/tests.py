@@ -77,7 +77,7 @@ class TestRun:
             return None
         self.runs += 1
         self.new = [
-            f"tests: {name} fails after your change: {detail}"[:300]
+            f"tests: {name} fails after the change but not before it: {detail}"[:300]
             for name, detail in sorted(after.items())
             if name not in self.baseline
         ][:MAX_REPORTED]
