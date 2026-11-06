@@ -62,11 +62,11 @@ def handle_event(run: "Run", event: dict[str, Any]) -> None:
     if event.get("event") == "result" and isinstance(event.get("result"), dict):
         r = event["result"]
         run.session_id = r.get("conversation_id") or run.session_id
-        run.result = {
+        run.record_result({
             "response": str(r.get("response") or "").strip(),
             "ok": r.get("status") == "SUCCESS",
             "error": r.get("error"),
             "usage": r.get("usage"),
             "duration_seconds": r.get("duration_seconds"),
             "denied": r.get("denied_actions"),
-        }
+        })
