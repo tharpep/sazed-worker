@@ -26,6 +26,12 @@ class Run:
         self.tool_calls = 0
         self.tools_used: list[str] = []
         self.result: dict[str, Any] | None = None  # normalized: response, ok, error, usage, ...
+        # Summed over every agent process of the job (first run, fix rounds, repair round), since
+        # run_job swaps self.result between rounds and the last one alone undercounts the job.
+        self.rounds = 0
+        self.usage: dict[str, Any] = {}
+        self.duration_seconds = 0.0
+        self.turns = 0
         self.session_id: str | None = None
         self.rate_limits: dict[str, Any] = {}  # first and last plan-usage reading (Claude only)
         # Set when Pryce's plan refused the run: {"window", "resets_at"} (plans/10 P1.2).
@@ -57,6 +63,15 @@ class Run:
             self._pending.append(event)
             if len(self._pending) > MAX_PENDING_EVENTS:
                 self._pending = self._pending[-MAX_PENDING_EVENTS:]
+
+    def record_result(self, result: dict[str, Any]) -> None:
+        """An adapter's normalized result for one agent process: kept as self.result, and its
+        usage, duration and turns added to the job's totals."""
+        self.result = result
+        self.rounds += 1
+        _add_usage(self.usage, result.get("usage"))
+        self.duration_seconds += result.get("duration_seconds") or 0
+        self.turns += result.get("turns") or 0
 
     def count_tool(self, name: str) -> None:
         self.tool_calls += 1
@@ -136,3 +151,21 @@ class Run:
         except Exception:
             log.exception("watchdog failed for job %s; killing the agent", self.job["id"])
             kill_group(proc)
+
+
+def _add_usage(total: dict[str, Any], usage: Any) -> None:
+    """Add one round's token counts into the running total: numbers are summed (nested counts
+    such as cache_creation too), and anything else keeps its last value."""
+    if not isinstance(usage, dict):
+        return
+    for key, value in usage.items():
+        if isinstance(value, bool):
+            total[key] = value
+        elif isinstance(value, int | float):
+            total[key] = (total.get(key) or 0) + value
+        elif isinstance(value, dict):
+            inner = total.get(key) if isinstance(total.get(key), dict) else {}
+            _add_usage(inner, value)
+            total[key] = inner
+        else:
+            total[key] = value

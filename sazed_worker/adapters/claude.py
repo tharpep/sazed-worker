@@ -133,7 +133,7 @@ def handle_event(run: "Run", event: dict[str, Any]) -> None:
         )
         _limited(run, window[1], window[2])
     if event.get("type") == "result":
-        run.result = {
+        run.record_result({
             "response": str(event.get("result") or "").strip(),
             "ok": not event.get("is_error") and event.get("subtype") == "success",
             "error": event.get("result") if event.get("is_error") else None,
@@ -141,7 +141,7 @@ def handle_event(run: "Run", event: dict[str, Any]) -> None:
             "duration_seconds": (event.get("duration_ms") or 0) / 1000,
             "denied": event.get("permission_denials") or None,
             "turns": event.get("num_turns"),
-        }
+        })
 
 
 def trim_event(event: dict[str, Any]) -> dict[str, Any]:
