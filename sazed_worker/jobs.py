@@ -7,6 +7,7 @@ from typing import Any
 from .adapters import agy, claude
 from .agent_process import JobFailed
 from .changes import changed_files
+from .check_result import check_result
 from .checks import Checks, checks_prompt
 from .config import JOBS_DIR, log
 from .repo import prepare_repo, repo_instructions, workspace
@@ -134,6 +135,8 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         "rate_limited": run.rate_limited,
         "stop_reason": run.stop_reason,
     }
+    if (summary := check_result(lint_meta)) is not None:
+        meta["check_result"] = summary
     base = {"agent_session_id": run.session_id, "meta": meta}
     partial = {"result": response or None}
     if job.get("profile") == "change" and run.stop_reason in PAUSING_STOPS:
