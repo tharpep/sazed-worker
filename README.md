@@ -21,7 +21,7 @@ It runs one job at a time and uses only the Python standard library.
 | `agent_process` | running children as the agent user, killing their process groups, `JobFailed` |
 | `agy`, `claude` | each CLI's command line (and Claude's profiles) and how its event stream is read |
 | `run` | one agent process, streamed to Sazed under the timeout and tool-call cap |
-| `repo`, `changes`, `checks` | workspaces and checkouts (and the repo's CLAUDE.md/REVIEW.md for the prompt), the changed-file list, the checks on a change job's edits |
+| `repo`, `changes`, `checks`, `pr_checks` | workspaces and checkouts (and the repo's CLAUDE.md/REVIEW.md for the prompt), the changed-file list, the checks on a change job's edits, and the same checks on a PR before its review |
 | `report` | the shape check on a change job's closing JSON block, and its one repair prompt |
 | `jail`, `deps`, `tests` | bubblewrap jail for dependency installs, checks and tests; dependency setup; the repo's tests run by the worker |
 | `jobs` | one job from start to its finish payload |
@@ -34,6 +34,7 @@ It runs one job at a time and uses only the Python standard library.
 - **Agent environment:** minimal. Claude Code gets only its own token.
 - **Scrubbing:** known secret values are removed from everything posted to Sazed.
 - **Review profile:** `--tools=Read,Grep,Glob` only (no Bash: even git diff can write files with `--output=`).
+  - **PR checks** (`pr_checks.py`, My-AI plans/14): a fresh review of a PR first gets the same checks and tests a change job gets, with the PR's merge base as "before" and its head as "after", both as throwaway copies. What the PR introduced goes at the top of the reviewer's prompt, and the job records one `meta.check_result`. Measured on CT 110: about 17 s for ruff and pytest on sazed, 56 s for `bash -n`, `go vet` and `go test` on kelsier. A follow-up that resumes the review skips them.
   - It refuses reads of the agent's own logins and `/proc`.
   - `--setting-sources=user` ignores a repo's `.claude/settings.json` hooks.
 - **Unit gotcha:** no explicit `User=root` in the unit. With `NoNewPrivileges=yes`, systemd then drops CAP_SETUID and the privilege drop fails.
@@ -68,7 +69,7 @@ It runs one job at a time and uses only the Python standard library.
 
 All three routes are authenticated with `X-Worker-Key`:
 - `POST /worker/claim` returns `204` when there is nothing to do, otherwise the job.
-- `POST /worker/jobs/{id}/events` stores streamed events. It doubles as the heartbeat and answers `{"cancel": true}` if the job was cancelled.
+- `POST /worker/jobs/{id}/events` stores streamed events. It doubles as the heartbeat and answers `{"cancel": true}` if the job was cancelled. While the worker runs checks or tests itself (no agent streaming), it posts an empty batch every 20 s so Sazed doesn't time the job out after its 120 s grace.
 - `POST /worker/jobs/{id}/finish` takes a status (`succeeded`, `failed` or `timed_out`), the result or error, the agent's session id, and meta (tools used, usage).
 
 ## Deploy

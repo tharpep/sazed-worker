@@ -1,6 +1,7 @@
 """One agent process: streams events to Sazed, enforces the timeout and tool-call cap."""
 
 import collections
+import contextlib
 import json
 import subprocess
 import threading
@@ -72,6 +73,24 @@ class Run:
         _add_usage(self.usage, result.get("usage"))
         self.duration_seconds += result.get("duration_seconds") or 0
         self.turns += result.get("turns") or 0
+
+    @contextlib.contextmanager
+    def heartbeat(self):
+        """Report in every 20 s while the worker itself is busy (checks, tests, dependency
+        installs): they can outlast the 120 s Sazed gives a silent job before timing it out."""
+        done = threading.Event()
+
+        def beat() -> None:
+            while not done.wait(20):
+                self._flush(force=True)
+
+        thread = threading.Thread(target=beat, daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            done.set()
+            thread.join(timeout=5)
 
     def count_tool(self, name: str) -> None:
         self.tool_calls += 1
