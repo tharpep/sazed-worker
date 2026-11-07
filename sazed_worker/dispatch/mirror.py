@@ -36,6 +36,8 @@ class Mirror:
         return cls(base, plan_id, os.environ.get("DISPATCH_SAZED_KEY")) if base else None
 
     def _post(self, path: str, body: dict[str, Any]) -> None:
+        if self.failed:
+            return
         headers = {"Content-Type": "application/json"}
         if self.key:
             headers["X-API-Key"] = self.key
@@ -45,9 +47,11 @@ class Mirror:
         try:
             urllib.request.urlopen(req, timeout=TIMEOUT_S).close()
         except Exception as e:
-            if not self.failed:
-                self.failed = True
-                print(f"dispatch: mirror to {self.base} failed: {e}", file=sys.stderr)
+            self.failed = True
+            print(
+                f"dispatch: mirror to {self.base} failed, run sync later: {e}",
+                file=sys.stderr,
+            )
 
     def row(self, row: dict[str, Any]) -> None:
         self._post("/dispatch/rows", {"plan": self.plan_id, **row})
