@@ -48,6 +48,34 @@ def _trees(job: dict[str, Any], repo_dir: Path, ws: Path) -> tuple[Path, Path]:
     return base, head
 
 
+_DIFF_CAP = 40_000
+
+
+def pr_diff(job: dict[str, Any], repo_dir: Path) -> str:
+    """The PR's diff against its merge base, as a prompt section: reviewers can't run git."""
+    pr_number = (job.get("params") or {})["pr_number"]
+    try:
+        base = _merge_base(repo_dir, pr_number, job.get("clone_token") or None)
+        stat = git("diff", "--stat", base, f"pr-{pr_number}", cwd=repo_dir).strip()
+        diff = git("diff", base, f"pr-{pr_number}", cwd=repo_dir)
+    except JobFailed as e:
+        log.info("job %s: no PR diff: %s", job["id"], e)
+        return ""
+    cut = len(diff) > _DIFF_CAP
+    if cut:
+        diff = diff[:_DIFF_CAP].rsplit("\n", 1)[0]
+    note = (
+        f"\n\nThe diff is cut at {_DIFF_CAP // 1000}k characters; read the files in the stat "
+        "above for the rest."
+        if cut
+        else ""
+    )
+    return (
+        f"The PR's diff against its merge base ({base[:7]}), given here because you can't run "
+        f"git yourself:\n\n```diff\n{stat}\n\n{diff}\n```{note}\n\n---\n\n"
+    )
+
+
 def pr_checks(job: dict[str, Any], repo_dir: Path, ws: Path) -> tuple[str, dict[str, Any]]:
     """(a prompt section for the reviewer, the lint meta for check_result). The section is ""
     when nothing could be checked; the reason is logged and kept in the meta."""
@@ -90,7 +118,7 @@ def _section(findings: list[str], lint_meta: dict[str, Any]) -> str:
     lines = [
         "Before you started, the worker ran checks on this PR, comparing its head with its merge "
         "base so only what the PR introduced is listed. You can't run anything yourself; treat "
-        "these as facts and include each one in your Issues section.",
+        "these as facts and include each one in your Findings section.",
         f"Ran: {', '.join(ran) or 'nothing applicable'}.",
     ]
     if skipped:

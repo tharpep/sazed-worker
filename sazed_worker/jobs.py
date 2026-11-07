@@ -11,7 +11,7 @@ from .changes import changed_files
 from .check_result import check_result
 from .checks import Checks, checks_prompt
 from .config import JOBS_DIR, log
-from .pr_checks import pr_checks
+from .pr_checks import pr_checks, pr_diff
 from .repo import prepare_repo, repo_instructions, workspace
 from .report import repair_prompt, report_problem
 from .run import Run
@@ -35,10 +35,16 @@ def _review_checks(
         return "", {}
     with run.heartbeat():
         try:
-            return pr_checks(job, repo_dir, ws)
+            diff = pr_diff(job, repo_dir)
+        except Exception:  # the diff only adds to a review; never let it fail it
+            log.exception("job %s: PR diff crashed", job["id"])
+            diff = ""
+        try:
+            section, meta = pr_checks(job, repo_dir, ws)
         except Exception as e:  # the checks only add to a review; never let them fail it
             log.exception("job %s: PR checks crashed", job["id"])
-            return "", {"pr_checks_skipped": f"worker error: {type(e).__name__}"}
+            section, meta = "", {"pr_checks_skipped": f"worker error: {type(e).__name__}"}
+    return diff + section, meta | {"pr_diff_chars": len(diff)}
 
 
 def run_job(job: dict[str, Any]) -> dict[str, Any]:
