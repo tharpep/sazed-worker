@@ -8,16 +8,22 @@ from pathlib import Path
 from typing import Any
 
 TIMEOUT_S = 3
-KEYS = ("model", "effort", "budget_usd", "timeout_s", "read_only", "evidence_required")
+KEYS = ("model", "effort", "budget_usd", "timeout_s", "read_only", "evidence_required", "mcp")
 
-_CHEAP = {"model": "haiku", "budget_usd": 0.5, "timeout_s": 600, "read_only": True}
+_CHEAP = {"model": "haiku", "budget_usd": 0.5, "timeout_s": 600, "read_only": True, "mcp": {}}
 
 BUILTIN: dict[str, dict[str, Any]] = {
     "smoke": {**_CHEAP, "effort": "medium"},
     "sweep": {**_CHEAP, "effort": "max"},
     "verify": {**_CHEAP, "effort": "max", "evidence_required": True},
-    "implement": {"model": "sonnet", "effort": "high", "budget_usd": 2.0, "timeout_s": 1200},
-    "design": {"model": "opus", "effort": "xhigh", "budget_usd": 4.0, "timeout_s": 1200},
+    "implement": {
+        "model": "sonnet",
+        "effort": "high",
+        "budget_usd": 2.0,
+        "timeout_s": 1200,
+        "mcp": {},
+    },
+    "design": {"model": "opus", "effort": "xhigh", "budget_usd": 4.0, "timeout_s": 1200, "mcp": {}},
 }
 
 _active: tuple[dict[str, dict[str, Any]], str] = (BUILTIN, "builtin")

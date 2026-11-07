@@ -9,6 +9,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from sazed_worker.dispatch import mcp
 from sazed_worker.dispatch import settings as agent_settings
 from sazed_worker.dispatch.board import Board
 from sazed_worker.dispatch.mirror import Mirror
@@ -94,8 +95,9 @@ def _claude() -> list[str]:
     return shlex.split(os.environ.get("DISPATCH_CLAUDE", "claude"))
 
 
-
-def agent_command(cfg: dict[str, Any], settings_path: Path, read_only: bool) -> list[str]:
+def agent_command(
+    cfg: dict[str, Any], settings_path: Path, read_only: bool, mcp_args: list[str] | None = None
+) -> list[str]:
     cmd = [
         *_claude(),
         "-p",
@@ -120,7 +122,7 @@ def agent_command(cfg: dict[str, Any], settings_path: Path, read_only: bool) -> 
     ]
     if read_only:
         cmd += ["--disallowedTools", READ_ONLY_TOOLS]
-    return cmd
+    return cmd + (mcp_args or [])
 
 
 def run_task(
@@ -137,7 +139,8 @@ def run_task(
     worktree = ws.create(task.id)
     run_dir = ws.home / "runs" / task.id
     settings_path = agent_settings.build(worktree, task.owns, run_dir, timeout_s)
-    cmd = agent_command(cfg, settings_path, read_only)
+    granted = mcp.build(cfg.get("mcp") or {}, run_dir)
+    cmd = agent_command(cfg, settings_path, read_only, granted.args)
     cmd += ["--", prompt_for(plan, task, read_only, check)]
     env = os.environ | {
         "DISPATCH_TASK": task.id,
@@ -147,7 +150,7 @@ def run_task(
     board.write(
         task.id,
         "running",
-        f"{cfg['model']} / {cfg['effort']}",
+        f"{cfg['model']} / {cfg['effort']}{granted.note}",
         worktree=str(worktree),
         profile=cfg["profile"],
     )
