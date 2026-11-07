@@ -80,4 +80,7 @@ class Mirror:
             "host": socket.gethostname(),
             "tasks": tasks,
         }
+        for key in ("project", "board_plan"):
+            if getattr(plan, key):
+                body[key] = getattr(plan, key)
         self._post("/dispatch/plans", body)

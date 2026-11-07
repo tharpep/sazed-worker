@@ -6,22 +6,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from sazed_worker.dispatch.profiles import BUILTIN, current
 from sazed_worker.dispatch.rules import glob_match
 
-DEFAULTS: dict[str, Any] = {
-    "model": "sonnet",
-    "effort": "medium",
-    "budget_usd": 2.0,
-    "timeout_s": 1200,
-    "read_only": False,
-}
-
-PROFILES: dict[str, dict[str, Any]] = {
-    "implement": {},
-    "design": {"model": "opus", "effort": "high", "budget_usd": 4.0},
-    "verify": {"model": "haiku", "read_only": True, "budget_usd": 0.5, "timeout_s": 600},
-    "sweep": {"model": "haiku", "read_only": True, "budget_usd": 0.5, "timeout_s": 600},
-}
+DEFAULTS: dict[str, Any] = {**BUILTIN["implement"], "read_only": False, "evidence_required": False}
 
 REQUIRED = ("model", "effort", "budget_usd", "timeout_s")
 _WILD = set("*?[")
@@ -51,6 +39,8 @@ class Plan:
     interfaces: list[str] = field(default_factory=list)
     regen: str | None = None
     interface_files: dict[str, str] = field(default_factory=dict)
+    project: str | None = None
+    board_plan: str | None = None
 
 
 _TASK_KEYS = {"id", "goal", "done", "owns", "depends_on", "check", "profile"}
@@ -74,6 +64,8 @@ def load(path: Path) -> Plan:
         interfaces=list(dict.fromkeys([*data.get("interfaces", []), *files])),
         regen=data.get("regen"),
         interface_files=files,
+        project=data.get("project"),
+        board_plan=data.get("board_plan"),
     )
 
 
@@ -83,15 +75,16 @@ def load_config(path: Path | None) -> dict[str, Any]:
 
 def resolve(task: Task, config: dict[str, Any]) -> dict[str, Any]:
     """The task's run settings: defaults, then its profile, then the config's, then its own."""
-    profiles = PROFILES | config.get("profiles", {})
+    registry, source = current()
+    profiles = registry | config.get("profiles", {})
     if task.profile not in profiles:
         raise PlanError(f"task {task.id}: unknown profile {task.profile!r}")
-    merged = DEFAULTS | config.get("defaults", {}) | PROFILES.get(task.profile, {})
+    merged = DEFAULTS | config.get("defaults", {}) | registry.get(task.profile, {})
     merged |= config.get("profiles", {}).get(task.profile, {}) | task.overrides
     missing = [k for k in REQUIRED if merged.get(k) in (None, "")]
     if missing:
         raise PlanError(f"task {task.id}: no {', '.join(missing)}")
-    return merged | {"profile": task.profile}
+    return merged | {"profile": task.profile, "profile_source": source}
 
 
 def could_overlap(a: str, b: str) -> bool:

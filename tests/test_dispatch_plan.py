@@ -130,7 +130,7 @@ class Resolve(unittest.TestCase):
 
     def test_a_missing_resource_is_refused(self):
         with self.assertRaises(plans.PlanError):
-            resolve(_task("a"), {"defaults": {"model": ""}})
+            resolve(_task("a"), {"profiles": {"implement": {"model": ""}}})
 
 
 class Cli(unittest.TestCase):

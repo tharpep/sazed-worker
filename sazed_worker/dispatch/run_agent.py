@@ -26,6 +26,7 @@ STATE_SCHEMA = {
     "required": ["state", "summary"],
 }
 
+EVIDENCE_TOOLS = ("Read", "Grep", "Glob")
 READ_ONLY_TOOLS = "Edit,Write,MultiEdit,NotebookEdit,Bash"
 
 PROMPT = """You are one task in the dispatch plan {plan}. Task {task}: {goal}
@@ -93,20 +94,8 @@ def _claude() -> list[str]:
     return shlex.split(os.environ.get("DISPATCH_CLAUDE", "claude"))
 
 
-def run_task(
-    plan: Plan, task: Task, ws: Workspace, board: Board, config: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    config = config or {}
-    cfg = resolve(task, config)
-    blocked = refusal(plan, task, board, config)
-    if blocked:
-        return board.write(task.id, "blocked", blocked)
-    read_only = bool(cfg["read_only"])
-    timeout_s = int(cfg["timeout_s"])
-    check = task.check or plan.check or config.get("check")
-    worktree = ws.create(task.id)
-    run_dir = ws.home / "runs" / task.id
-    settings_path = agent_settings.build(worktree, task.owns, run_dir, timeout_s)
+
+def agent_command(cfg: dict[str, Any], settings_path: Path, read_only: bool) -> list[str]:
     cmd = [
         *_claude(),
         "-p",
@@ -121,6 +110,7 @@ def run_task(
         str(settings_path),
         "--setting-sources",
         "project",
+        "--strict-mcp-config",
         "--permission-mode",
         "acceptEdits",
         "--max-budget-usd",
@@ -130,6 +120,24 @@ def run_task(
     ]
     if read_only:
         cmd += ["--disallowedTools", READ_ONLY_TOOLS]
+    return cmd
+
+
+def run_task(
+    plan: Plan, task: Task, ws: Workspace, board: Board, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    config = config or {}
+    cfg = resolve(task, config)
+    blocked = refusal(plan, task, board, config)
+    if blocked:
+        return board.write(task.id, "blocked", blocked)
+    read_only = bool(cfg["read_only"])
+    timeout_s = int(cfg["timeout_s"])
+    check = task.check or plan.check or config.get("check")
+    worktree = ws.create(task.id)
+    run_dir = ws.home / "runs" / task.id
+    settings_path = agent_settings.build(worktree, task.owns, run_dir, timeout_s)
+    cmd = agent_command(cfg, settings_path, read_only)
     cmd += ["--", prompt_for(plan, task, read_only, check)]
     env = os.environ | {
         "DISPATCH_TASK": task.id,
@@ -144,7 +152,21 @@ def run_task(
         profile=cfg["profile"],
     )
     outcome = _run(cmd, worktree, env, timeout_s, run_dir / "agent.jsonl", board.mirror, task.id)
-    return _finish(task, ws, board, outcome, read_only, timeout_s)
+    return _finish(
+        task, ws, board, outcome, read_only, timeout_s, bool(cfg.get("evidence_required"))
+    )
+
+
+def _reads(event: dict[str, Any]) -> int:
+    if event.get("type") != "assistant":
+        return 0
+    content = (event.get("message") or {}).get("content")
+    blocks = content if isinstance(content, list) else []
+    return sum(
+        1
+        for b in blocks
+        if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in EVIDENCE_TOOLS
+    )
 
 
 def _run(
@@ -205,6 +227,7 @@ def _run(
         "code": proc.returncode,
         "timed_out": timed_out,
         "result": result,
+        "evidence": sum(_reads(e) for e in events),
         "stderr": err_path.read_text()[-500:],
     }
 
@@ -216,6 +239,7 @@ def _finish(
     outcome: dict[str, Any],
     read_only: bool,
     timeout_s: int,
+    evidence_required: bool = False,
 ) -> dict[str, Any]:
     result = outcome["result"] or {}
     common = {
@@ -240,6 +264,8 @@ def _finish(
         )
     if structured.get("state") != "done":
         return board.write(task.id, "failed", "finished without a done or waiting result", **common)
+    if evidence_required and not outcome["evidence"]:
+        return board.write(task.id, "failed", "no evidence read", **common)
     summary = structured.get("summary") or "done"
     if not read_only and ws.commits(task.id) == 0:
         return board.write(task.id, "failed", f"said done but made no commits: {summary}", **common)
