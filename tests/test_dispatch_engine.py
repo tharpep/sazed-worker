@@ -161,7 +161,40 @@ class Engine(unittest.TestCase):
         self.board.write("docs", "done", "ok")
         integrate.clean(plan, self.ws, self.board)
         self.assertFalse(self.ws.task_dir("api").exists())
-        self.assertEqual(self.board.state("api"), "cleaned")
+        self.assertEqual(self.board.rows("api")[-1]["state"], "cleaned")
+
+    def _plan_with_check(self, check: str) -> Plan:
+        plan = _plan()
+        object.__setattr__(plan, "check", check)
+        return plan
+
+    def test_init_accepts_a_check_that_finds_no_tests(self):
+        integrate.init(self._plan_with_check("exit 5"), self.ws, self.board, "main")
+        self.assertIn("src/shared/types.txt", self.integ_files())
+
+    def test_a_refused_init_leaves_no_integ_branch_or_worktree_and_can_retry(self):
+        with self.assertRaises(integrate.IntegrateError):
+            integrate.init(self._plan_with_check("exit 1"), self.ws, self.board, "main")
+        self.assertFalse(self.ws.integ_exists())
+        self.assertFalse(self.ws.integ_dir.exists())
+        self.assertNotIn("integ", git("worktree", "list", cwd=self.repo))
+        integrate.init(_plan(), self.ws, self.board, "main")
+        self.assertIn("src/shared/types.txt", self.integ_files())
+
+    def test_clean_removes_the_integ_worktree_and_branch(self):
+        plan = _plan()
+        integrate.go(plan, self.ws, self.board, "main")
+        integrate.clean(plan, self.ws, self.board)
+        self.assertFalse(self.ws.integ_exists())
+        self.assertFalse(self.ws.integ_dir.exists())
+        self.assertNotIn("integ", git("worktree", "list", cwd=self.repo))
+
+    def test_a_cleaned_plan_runs_again_from_scratch(self):
+        plan = _plan()
+        integrate.go(plan, self.ws, self.board, "main")
+        integrate.clean(plan, self.ws, self.board)
+        states = integrate.go(plan, self.ws, self.board, "main")
+        self.assertEqual(states, {"api": "landed", "ui": "landed", "docs": "landed"})
 
     def test_the_cli_runs_a_plan_and_shows_the_board(self):
         plan_file = self.tmp / "plan.json"
