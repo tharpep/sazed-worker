@@ -26,6 +26,7 @@ It runs one job at a time and uses only the Python standard library.
 | `jail`, `deps`, `tests` | bubblewrap jail for dependency installs, checks and tests; dependency setup; the repo's tests run by the worker |
 | `jobs` | one job from start to its finish payload |
 | `main` | the claim loop and workspace cleanup |
+| `dispatch` | the graph engine's local mode (My-AI plans/17); so far `probe`, which writes `CAPABILITIES.md` from headless `claude -p` runs |
 
 ## How it runs
 
