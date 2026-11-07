@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import HTTPServer
 from pathlib import Path
@@ -79,6 +80,15 @@ class Posting(unittest.TestCase):
         self.assertEqual(
             set(batches[0]["steps"][0]), {"ts", "seq", "kind", "tool", "text", "error"}
         )
+
+    def test_a_lone_step_posts_within_3_seconds_without_close(self):
+        sender = StepSender(self.mirror, "a", WT)
+        self.addCleanup(sender.close)
+        sender.add(tool_event(f"{WT}/slow"))
+        deadline = time.monotonic() + 3
+        while not self.server.seen and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertEqual([len(b["steps"]) for _, _, b in self.server.seen], [1])
 
     def test_a_run_through__run_posts_its_steps_and_leaves_the_log_whole(self):
         tmp = Path(tempfile.mkdtemp(prefix="dispatch-steps-"))

@@ -10,6 +10,7 @@ from sazed_worker.dispatch.mirror import Mirror
 MAX_TEXT = 160
 BATCH = 10
 INTERVAL_S = 2.0
+TICK_S = 1.0
 
 
 def _short(text: str, worktree: str) -> str:
@@ -59,27 +60,38 @@ class StepSender:
         self.seq = 0
         self.pending: list[dict[str, Any]] = []
         self.last_send = time.monotonic()
+        self.lock = threading.Lock()
         self.queue: queue.Queue[list[dict[str, Any]] | None] = queue.Queue()
         self.thread = threading.Thread(target=self._drain, daemon=True)
         if mirror:
             self.thread.start()
 
     def _drain(self) -> None:
-        while (batch := self.queue.get()) is not None:
-            assert self.mirror
+        assert self.mirror
+        while True:
+            try:
+                batch = self.queue.get(timeout=TICK_S)
+            except queue.Empty:
+                with self.lock:
+                    if self.pending and time.monotonic() - self.last_send >= INTERVAL_S:
+                        self._send(len(self.pending))
+                continue
+            if batch is None:
+                return
             self.mirror.steps(self.task, batch)
 
     def add(self, event: dict[str, Any]) -> None:
         if not self.mirror:
             return
         ts = time.time()
-        for step in event_steps(event, self.worktree):
-            self.pending.append({"ts": ts, "seq": self.seq, **step})
-            self.seq += 1
-        while len(self.pending) >= BATCH:
-            self._send(BATCH)
-        if self.pending and time.monotonic() - self.last_send >= INTERVAL_S:
-            self._send(len(self.pending))
+        with self.lock:
+            for step in event_steps(event, self.worktree):
+                self.pending.append({"ts": ts, "seq": self.seq, **step})
+                self.seq += 1
+            while len(self.pending) >= BATCH:
+                self._send(BATCH)
+            if self.pending and time.monotonic() - self.last_send >= INTERVAL_S:
+                self._send(len(self.pending))
 
     def _send(self, n: int) -> None:
         self.queue.put(self.pending[:n])
@@ -89,7 +101,8 @@ class StepSender:
     def close(self) -> None:
         if not self.mirror:
             return
-        if self.pending:
-            self._send(len(self.pending))
-        self.queue.put(None)
+        with self.lock:
+            if self.pending:
+                self._send(len(self.pending))
+            self.queue.put(None)
         self.thread.join(timeout=10)
