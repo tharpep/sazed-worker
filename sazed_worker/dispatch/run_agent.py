@@ -11,7 +11,9 @@ from typing import Any
 
 from sazed_worker.dispatch import settings as agent_settings
 from sazed_worker.dispatch.board import Board
+from sazed_worker.dispatch.mirror import Mirror
 from sazed_worker.dispatch.plan import Plan, Task, could_overlap, resolve
+from sazed_worker.dispatch.steps import StepSender
 from sazed_worker.dispatch.workspace import Workspace
 
 STATE_SCHEMA = {
@@ -141,16 +143,23 @@ def run_task(
         worktree=str(worktree),
         profile=cfg["profile"],
     )
-    outcome = _run(cmd, worktree, env, timeout_s, run_dir / "agent.jsonl")
+    outcome = _run(cmd, worktree, env, timeout_s, run_dir / "agent.jsonl", board.mirror, task.id)
     return _finish(task, ws, board, outcome, read_only, timeout_s)
 
 
 def _run(
-    cmd: list[str], cwd: Path, env: dict[str, str], timeout_s: int, log: Path
+    cmd: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    timeout_s: int,
+    log: Path,
+    mirror: Mirror | None = None,
+    task: str = "",
 ) -> dict[str, Any]:
     err_path = log.with_name("agent.stderr")
     events: list[dict[str, Any]] = []
     timed_out = False
+    sender = StepSender(mirror, task, str(cwd))
     with (
         err_path.open("a") as err,
         subprocess.Popen(
@@ -171,9 +180,12 @@ def _run(
                     f.write(line)
                     if line.startswith("{"):
                         try:
-                            events.append(json.loads(line))
+                            event = json.loads(line)
                         except ValueError:
-                            pass
+                            continue
+                        events.append(event)
+                        sender.add(event)
+            sender.close()
 
         reader = threading.Thread(target=pump, daemon=True)
         reader.start()

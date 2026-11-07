@@ -56,6 +56,9 @@ class Mirror:
     def row(self, row: dict[str, Any]) -> None:
         self._post("/dispatch/rows", {"plan": self.plan_id, **row})
 
+    def steps(self, task: str, steps: list[dict[str, Any]]) -> None:
+        self._post("/dispatch/steps", {"plan": self.plan_id, "task": task, "steps": steps})
+
     def plan(self, plan: Plan, config: dict[str, Any], repo: Path, base: str) -> None:
         tasks = []
         for t in plan.tasks:
