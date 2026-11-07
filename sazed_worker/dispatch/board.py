@@ -47,4 +47,6 @@ class Board:
 
     def state(self, task: str) -> str | None:
         rows = self.rows(task)
-        return rows[-1]["state"] if rows else None
+        if not rows or rows[-1]["state"] == "cleaned":
+            return None
+        return rows[-1]["state"]

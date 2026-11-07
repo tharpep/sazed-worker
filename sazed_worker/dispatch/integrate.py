@@ -10,7 +10,9 @@ from sazed_worker.dispatch.board import Board
 from sazed_worker.dispatch.plan import Plan, Task, resolve
 from sazed_worker.dispatch.rules import glob_match
 from sazed_worker.dispatch.run_agent import refusal, run_task, unready_deps
-from sazed_worker.dispatch.workspace import Workspace, run_shell
+from sazed_worker.dispatch.workspace import Workspace, run_code
+
+NO_TESTS_RAN = 5
 
 
 class IntegrateError(RuntimeError):
@@ -45,14 +47,17 @@ def init(
 ) -> str:
     """Open integ/<plan> and commit the shared interface files once the check passes on them."""
     config = config or {}
+    fresh = not ws.integ_exists()
     ws.open(base)
     if plan.interface_files:
         for rel, content in plan.interface_files.items():
             path = ws.integ_dir / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content)
-        ok, out = run_shell(_check(plan, None, config), ws.integ_dir)
-        if not ok:
+        code, out = run_code(_check(plan, None, config), ws.integ_dir)
+        if code not in (0, NO_TESTS_RAN):
+            if fresh:
+                ws.discard([])
             raise IntegrateError(f"the check fails on the interface files: {out[-300:]}")
         ws.commit_all(f"Interfaces for {plan.id}", list(plan.interface_files))
     return ws.tip()

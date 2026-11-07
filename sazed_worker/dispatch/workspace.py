@@ -18,14 +18,19 @@ def git(*args: str, cwd: Path, check: bool = True) -> str:
     return proc.stdout.strip()
 
 
-def run_shell(command: str, cwd: Path, timeout_s: int = 1200) -> tuple[bool, str]:
+def run_code(command: str, cwd: Path, timeout_s: int = 1200) -> tuple[int, str]:
     try:
         proc = subprocess.run(
             command, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout_s
         )
     except subprocess.TimeoutExpired:
-        return False, f"timed out after {timeout_s} s"
-    return proc.returncode == 0, (proc.stdout + proc.stderr)[-1500:]
+        return -1, f"timed out after {timeout_s} s"
+    return proc.returncode, (proc.stdout + proc.stderr)[-1500:]
+
+
+def run_shell(command: str, cwd: Path, timeout_s: int = 1200) -> tuple[bool, str]:
+    code, out = run_code(command, cwd, timeout_s)
+    return code == 0, out
 
 
 @dataclass(frozen=True)
@@ -49,15 +54,12 @@ class Workspace:
     def task_dir(self, task_id: str) -> Path:
         return self.home / "wt" / task_id
 
+    def integ_exists(self) -> bool:
+        ref = f"refs/heads/{self.integ_branch}"
+        return bool(git("rev-parse", "--verify", "-q", ref, cwd=self.repo, check=False))
+
     def open(self, base: str) -> str:
-        if not git(
-            "rev-parse",
-            "--verify",
-            "-q",
-            f"refs/heads/{self.integ_branch}",
-            cwd=self.repo,
-            check=False,
-        ):
+        if not self.integ_exists():
             git("branch", self.integ_branch, base, cwd=self.repo)
         if not self.integ_dir.exists():
             self.home.mkdir(parents=True, exist_ok=True)
@@ -141,7 +143,9 @@ class Workspace:
             self.remove(task_id)
             git("branch", "-q", "-D", self.task_branch(task_id), cwd=self.repo, check=False)
         git("worktree", "remove", "--force", str(self.integ_dir), cwd=self.repo, check=False)
+        shutil.rmtree(self.integ_dir, ignore_errors=True)
         git("worktree", "prune", cwd=self.repo, check=False)
+        git("branch", "-q", "-D", self.integ_branch, cwd=self.repo, check=False)
 
 
 def default_home(plan_id: str) -> Path:
