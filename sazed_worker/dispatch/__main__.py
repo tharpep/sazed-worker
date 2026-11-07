@@ -8,6 +8,7 @@ from pathlib import Path
 from sazed_worker.dispatch import integrate
 from sazed_worker.dispatch import plan as plans
 from sazed_worker.dispatch.board import Board
+from sazed_worker.dispatch.mirror import Mirror
 from sazed_worker.dispatch.run_agent import run_task
 from sazed_worker.dispatch.workspace import GitError, Workspace, default_home
 
@@ -40,7 +41,7 @@ def _context(args: argparse.Namespace):
         raise plans.PlanError("the plan doesn't validate:\n" + "\n".join(problems))
     home = default_home(loaded.id)
     ws = Workspace(Path(args.repo).resolve(), loaded.id, home)
-    return loaded, config, ws, Board(home)
+    return loaded, config, ws, Board(home, Mirror.from_env(loaded.id))
 
 
 def _print_board(plan: plans.Plan, board: Board) -> None:
@@ -87,6 +88,14 @@ def _act(args: argparse.Namespace) -> int:
                     open_pr=not args.no_pr,
                 )
             )
+        elif args.command == "sync":
+            if not board.mirror:
+                print("refused: DISPATCH_SAZED_URL is not set")
+                return 1
+            board.mirror.plan(plan, config, ws.repo, args.base)
+            for path in sorted(board.dir.glob("*.jsonl")):
+                for row in board.rows(path.stem):
+                    board.mirror.row(row)
         elif args.command == "clean":
             integrate.clean(plan, ws, board)
     except (plans.PlanError, integrate.IntegrateError, GitError, OSError) as e:
@@ -121,6 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     exp.add_argument("--title")
     exp.add_argument("--body")
     exp.add_argument("--no-pr", action="store_true", help="push only")
+    command("sync", "post the plan and every board row to Sazed")
     command("clean", "remove the plan's worktrees and task branches")
     args = parser.parse_args(argv)
     return args.func(args)
