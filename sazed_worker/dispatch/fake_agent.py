@@ -39,6 +39,9 @@ def main() -> None:
         pass
     elif mode == "waiting":
         state, extra = "waiting", {"question": "Which file holds the shared type?"}
+    elif mode == "reads":
+        block = {"type": "tool_use", "name": "Read", "input": {"file_path": "README.md"}}
+        print(json.dumps({"type": "assistant", "message": {"content": [block]}}), flush=True)
     elif mode == "hang":
         time.sleep(600)
     print(
