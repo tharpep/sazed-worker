@@ -47,6 +47,8 @@ def init(
 ) -> str:
     """Open integ/<plan> and commit the shared interface files once the check passes on them."""
     config = config or {}
+    if board.mirror:
+        board.mirror.plan(plan, config, ws.repo, base)
     fresh = not ws.integ_exists()
     ws.open(base)
     if plan.interface_files:

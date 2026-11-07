@@ -3,14 +3,18 @@
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from sazed_worker.dispatch.mirror import Mirror
 
 STATES = ("running", "done", "waiting", "failed", "landed", "conflict", "blocked", "cleaned")
 SETTLED = ("done", "waiting", "failed", "landed", "conflict", "blocked", "cleaned")
 
 
 class Board:
-    def __init__(self, home: Path):
+    def __init__(self, home: Path, mirror: "Mirror | None" = None):
+        self.mirror = mirror
         self.dir = home / "board"
         self.dir.mkdir(parents=True, exist_ok=True)
 
@@ -29,6 +33,8 @@ class Board:
         }
         with (self.dir / f"{task}.jsonl").open("a") as f:
             f.write(json.dumps(row) + "\n")
+        if self.mirror:
+            self.mirror.row(row)
         return row
 
     def rows(self, task: str) -> list[dict[str, Any]]:
