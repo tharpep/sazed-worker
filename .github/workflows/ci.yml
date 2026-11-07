@@ -36,3 +36,6 @@ jobs:
 
       - name: Lint (whole repo, ruff.toml)
         run: ruff check --output-format=github .
+
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
