@@ -94,20 +94,8 @@ def _claude() -> list[str]:
     return shlex.split(os.environ.get("DISPATCH_CLAUDE", "claude"))
 
 
-def run_task(
-    plan: Plan, task: Task, ws: Workspace, board: Board, config: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    config = config or {}
-    cfg = resolve(task, config)
-    blocked = refusal(plan, task, board, config)
-    if blocked:
-        return board.write(task.id, "blocked", blocked)
-    read_only = bool(cfg["read_only"])
-    timeout_s = int(cfg["timeout_s"])
-    check = task.check or plan.check or config.get("check")
-    worktree = ws.create(task.id)
-    run_dir = ws.home / "runs" / task.id
-    settings_path = agent_settings.build(worktree, task.owns, run_dir, timeout_s)
+
+def agent_command(cfg: dict[str, Any], settings_path: Path, read_only: bool) -> list[str]:
     cmd = [
         *_claude(),
         "-p",
@@ -122,6 +110,7 @@ def run_task(
         str(settings_path),
         "--setting-sources",
         "project",
+        "--strict-mcp-config",
         "--permission-mode",
         "acceptEdits",
         "--max-budget-usd",
@@ -131,6 +120,24 @@ def run_task(
     ]
     if read_only:
         cmd += ["--disallowedTools", READ_ONLY_TOOLS]
+    return cmd
+
+
+def run_task(
+    plan: Plan, task: Task, ws: Workspace, board: Board, config: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    config = config or {}
+    cfg = resolve(task, config)
+    blocked = refusal(plan, task, board, config)
+    if blocked:
+        return board.write(task.id, "blocked", blocked)
+    read_only = bool(cfg["read_only"])
+    timeout_s = int(cfg["timeout_s"])
+    check = task.check or plan.check or config.get("check")
+    worktree = ws.create(task.id)
+    run_dir = ws.home / "runs" / task.id
+    settings_path = agent_settings.build(worktree, task.owns, run_dir, timeout_s)
+    cmd = agent_command(cfg, settings_path, read_only)
     cmd += ["--", prompt_for(plan, task, read_only, check)]
     env = os.environ | {
         "DISPATCH_TASK": task.id,
