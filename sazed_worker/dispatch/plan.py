@@ -50,6 +50,7 @@ class Plan:
     check: str | None = None
     interfaces: list[str] = field(default_factory=list)
     regen: str | None = None
+    interface_files: dict[str, str] = field(default_factory=dict)
 
 
 _TASK_KEYS = {"id", "goal", "done", "owns", "depends_on", "check", "profile"}
@@ -65,12 +66,14 @@ def load(path: Path) -> Plan:
         known.setdefault("done", "")
         overrides = {k: v for k, v in raw.items() if k not in _TASK_KEYS}
         tasks.append(Task(**known, overrides=overrides))
+    files = data.get("interface_files", {})
     return Plan(
         id=data["id"],
         tasks=tasks,
         check=data.get("check"),
-        interfaces=data.get("interfaces", []),
+        interfaces=list(dict.fromkeys([*data.get("interfaces", []), *files])),
         regen=data.get("regen"),
+        interface_files=files,
     )
 
 

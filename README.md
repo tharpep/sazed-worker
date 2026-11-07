@@ -26,7 +26,7 @@ It runs one job at a time and uses only the Python standard library.
 | `jail`, `deps`, `tests` | bubblewrap jail for dependency installs, checks and tests; dependency setup; the repo's tests run by the worker |
 | `jobs` | one job from start to its finish payload |
 | `main` | the claim loop and workspace cleanup |
-| `dispatch` | the graph engine's local mode (My-AI plans/17): `probe` writes `CAPABILITIES.md` from headless `claude -p` runs; `rules`, `hook` and `settings` are the agent guardrails, a deny rule and a hook for each refusal; `plan` loads a plan, resolves each task's profile and refuses a bad plan in code (`python -m sazed_worker.dispatch validate plan.json`) |
+| `dispatch` | the graph engine's local mode (My-AI plans/17): `probe` writes `CAPABILITIES.md` from headless `claude -p` runs; `rules`, `hook` and `settings` are the agent guardrails, a deny rule and a hook for each refusal; `plan` loads a plan, resolves each task's profile and refuses a bad plan in code; `workspace` (every git call), `board`, `run_agent`, `fake_agent` and `integrate` run a plan: `python -m sazed_worker.dispatch validate|init|run|land|go|board|export|clean plan.json` |
 
 ## How it runs
 
