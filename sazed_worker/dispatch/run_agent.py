@@ -172,6 +172,26 @@ def _reads(event: dict[str, Any]) -> int:
     )
 
 
+class ReadingSender:
+    """Mirrors the plan windows from rate_limit_event, once per change in their utilization."""
+
+    def __init__(self, mirror: Mirror | None):
+        self.mirror = mirror
+        self.last: dict[str, Any] | None = None
+
+    def add(self, event: dict[str, Any]) -> None:
+        info = event.get("rate_limit_info")
+        if not self.mirror or event.get("type") != "rate_limit_event" or not isinstance(info, dict):
+            return
+        windows = info.get("unifiedWindows")
+        if not isinstance(windows, dict):
+            return
+        used = {k: w.get("utilization") for k, w in windows.items() if isinstance(w, dict)}
+        if used and used != self.last:
+            self.last = used
+            self.mirror.reading(info)
+
+
 def _run(
     cmd: list[str],
     cwd: Path,
@@ -185,6 +205,7 @@ def _run(
     events: list[dict[str, Any]] = []
     timed_out = False
     sender = StepSender(mirror, task, str(cwd))
+    readings = ReadingSender(mirror)
     with (
         err_path.open("a") as err,
         subprocess.Popen(
@@ -210,6 +231,7 @@ def _run(
                             continue
                         events.append(event)
                         sender.add(event)
+                        readings.add(event)
             sender.close()
 
         reader = threading.Thread(target=pump, daemon=True)
