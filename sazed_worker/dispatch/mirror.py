@@ -56,6 +56,10 @@ class Mirror:
     def row(self, row: dict[str, Any]) -> None:
         self._post("/dispatch/rows", {"plan": self.plan_id, **row})
 
+    def reading(self, info: dict[str, Any]) -> None:
+        body = {"machine": socket.gethostname(), "rate_limit_info": info}
+        self._post("/claude-usage/readings", body)
+
     def steps(self, task: str, steps: list[dict[str, Any]]) -> None:
         self._post("/dispatch/steps", {"plan": self.plan_id, "task": task, "steps": steps})
 

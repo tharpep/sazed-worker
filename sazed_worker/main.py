@@ -1,4 +1,4 @@
-"""The claim loop: claim a job, run it, post the result; clean old workspaces hourly."""
+"""The claim loop: run claimed jobs, clean old workspaces hourly, probe plan limits when idle."""
 
 import os
 import shutil
@@ -7,7 +7,7 @@ import socket
 import time
 from typing import Any
 
-from . import adapters
+from . import adapters, limits
 from .agent_process import JobFailed
 from .config import (
     AGENT_USER,
@@ -62,6 +62,7 @@ def main() -> None:
     hostname = socket.gethostname()
     log.info("sazed-worker started: %s, agents %s as %s", SAZED_URL, _agents(), AGENT_USER)
     last_cleanup = 0.0
+    last_probe = 0.0
 
     while not stop.is_set():
         if time.time() - last_cleanup > 3600:
@@ -71,6 +72,9 @@ def main() -> None:
         if status != 200 or not isinstance(job, dict):
             if status not in (200, 204):
                 log.warning("claim returned %s: %s", status, job)
+            elif time.time() - last_probe > limits.CHECK_EVERY_S:
+                limits.probe()
+                last_probe = time.time()
             stop.wait(POLL_SECONDS if status in (200, 204) else POLL_SECONDS * 3)
             continue
 
