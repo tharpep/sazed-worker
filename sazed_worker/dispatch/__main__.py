@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from sazed_worker.dispatch import integrate, profiles
+from sazed_worker.dispatch import integrate, mcp, profiles
 from sazed_worker.dispatch import plan as plans
 from sazed_worker.dispatch.board import Board
 from sazed_worker.dispatch.mirror import Mirror
@@ -15,12 +15,20 @@ from sazed_worker.dispatch.workspace import GitError, Workspace, default_home
 
 def _profiles(args: argparse.Namespace) -> int:
     table, source = profiles.load()
-    print(json.dumps({"source": source, "profiles": table}, indent=2))
+    servers, mcp_source = mcp.load()
+    out = {
+        "source": source,
+        "profiles": table,
+        "mcp_source": mcp_source,
+        "mcp_servers": sorted(servers),
+    }
+    print(json.dumps(out, indent=2))
     return 0
 
 
 def _load(args: argparse.Namespace) -> tuple[plans.Plan, dict]:
     profiles.load()
+    mcp.load()
     loaded = plans.load(Path(args.plan))
     config = plans.load_config(Path(args.config) if args.config else None)
     return loaded, config
