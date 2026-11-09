@@ -90,7 +90,18 @@ class Workspace:
             self.tip(),
             cwd=self.repo,
         )
+        self._exclude_agents()
         return path
+
+    def _exclude_agents(self) -> None:
+        exclude = self.repo / ".git" / "info" / "exclude"
+        if exclude.exists():
+            text = exclude.read_text()
+            if ".agents" not in text:
+                exclude.write_text(text.rstrip() + "\n.agents\n")
+        else:
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            exclude.write_text(".agents\n")
 
     def commits(self, task_id: str) -> int:
         span = f"{self.integ_branch}..{self.task_branch(task_id)}"

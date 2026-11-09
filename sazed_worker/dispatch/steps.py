@@ -27,29 +27,59 @@ def _first_line(content: Any) -> str:
 
 def event_steps(event: dict[str, Any], worktree: str) -> list[dict[str, Any]]:
     """The steps one assistant or user event holds, without ts or seq."""
-    if event.get("type") not in ("assistant", "user"):
-        return []
-    content = (event.get("message") or {}).get("content")
-    if not isinstance(content, list):
-        return []
-    out = []
-    for block in content:
-        if not isinstance(block, dict):
-            continue
-        kind = block.get("type")
-        if event["type"] == "assistant" and kind == "tool_use":
-            args = block.get("input") or {}
-            first = next(iter(args.values()), "") if isinstance(args, dict) else ""
-            step = ("tool", block.get("name"), _short(str(first), worktree), False)
-        elif event["type"] == "user" and kind == "tool_result":
-            text = _short(_first_line(block.get("content")), worktree)
-            step = ("result", None, text, bool(block.get("is_error")))
-        elif event["type"] == "assistant" and kind == "text":
-            step = ("text", None, _short(str(block.get("text") or ""), worktree), False)
-        else:
-            continue
-        out.append(dict(zip(("kind", "tool", "text", "error"), step, strict=True)))
-    return out
+    if event.get("type") in ("assistant", "user"):
+        content = (event.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            return []
+        out = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            kind = block.get("type")
+            if event["type"] == "assistant" and kind == "tool_use":
+                args = block.get("input") or {}
+                first = next(iter(args.values()), "") if isinstance(args, dict) else ""
+                step = ("tool", block.get("name"), _short(str(first), worktree), False)
+            elif event["type"] == "user" and kind == "tool_result":
+                text = _short(_first_line(block.get("content")), worktree)
+                step = ("result", None, text, bool(block.get("is_error")))
+            elif event["type"] == "assistant" and kind == "text":
+                step = ("text", None, _short(str(block.get("text") or ""), worktree), False)
+            else:
+                continue
+            out.append(dict(zip(("kind", "tool", "text", "error"), step, strict=True)))
+        return out
+    if event.get("event") == "step_update":
+        update = event.get("step_update") or {}
+        step_type = update.get("step_type")
+        state = update.get("state")
+        if step_type in ("tool", "tool_call") and state == "ACTIVE":
+            tool = update.get("tool_name") or (update.get("tool_info") or {}).get("name")
+            params = (
+                (update.get("tool_info") or {}).get("parameters")
+                or (update.get("tool_call") or {}).get("arguments")
+                or {}
+            )
+            first = next(iter(params.values()), "") if isinstance(params, dict) else ""
+            step = ("tool", tool, _short(str(first), worktree), False)
+            return [dict(zip(("kind", "tool", "text", "error"), step, strict=True))]
+        if step_type == "tool" and state == "DONE":
+            output = (update.get("tool_info") or {}).get("output", "")
+            if output:
+                text = _short(_first_line(output), worktree)
+                step = ("result", None, text, False)
+                return [dict(zip(("kind", "tool", "text", "error"), step, strict=True))]
+        if step_type == "tool_result":
+            res = update.get("tool_result") or {}
+            text = _short(_first_line(res.get("result", "")), worktree)
+            step = ("result", None, text, bool(res.get("error")))
+            return [dict(zip(("kind", "tool", "text", "error"), step, strict=True))]
+        if step_type == "agent_response" and state == "DONE":
+            text = (update.get("text_delta") or "").strip()
+            if text:
+                step = ("text", None, _short(text, worktree), False)
+                return [dict(zip(("kind", "tool", "text", "error"), step, strict=True))]
+    return []
 
 
 class StepSender:

@@ -57,6 +57,53 @@ class Converting(unittest.TestCase):
         thinking = {"type": "assistant", "message": {"content": [{"type": "thinking"}]}}
         self.assertEqual(event_steps(thinking, WT), [])
 
+    def test_an_agy_tool_call_becomes_a_tool_step_with_first_parameter(self):
+        """Proves an agy active tool step update converts to a dispatch tool step."""
+        params = {"CommandLine": "python3 check.py"}
+        event = {
+            "event": "step_update",
+            "step_update": {
+                "step_type": "tool",
+                "state": "ACTIVE",
+                "tool_name": "run_command",
+                "tool_info": {"name": "run_command", "parameters": params},
+            },
+        }
+        steps = event_steps(event, WT)
+        expected = [
+            {"kind": "tool", "tool": "run_command", "text": "python3 check.py", "error": False}
+        ]
+        self.assertEqual(steps, expected)
+
+    def test_an_agy_tool_result_becomes_a_result_step(self):
+        """Proves an agy tool result step update converts to a dispatch result step."""
+        event = {
+            "event": "step_update",
+            "step_update": {
+                "step_type": "tool_result",
+                "tool_result": {"result": f"Done in {WT}/src/a.py\nline 2", "error": False},
+            },
+        }
+        steps = event_steps(event, WT)
+        self.assertEqual(
+            steps, [{"kind": "result", "tool": None, "text": "Done in src/a.py", "error": False}]
+        )
+
+    def test_an_agy_agent_response_becomes_a_text_step(self):
+        """Proves an agy agent response text delta converts to a dispatch text step."""
+        event = {
+            "event": "step_update",
+            "step_update": {
+                "step_type": "agent_response",
+                "state": "DONE",
+                "text_delta": "all tests green",
+            },
+        }
+        steps = event_steps(event, WT)
+        self.assertEqual(
+            steps, [{"kind": "text", "tool": None, "text": "all tests green", "error": False}]
+        )
+
 
 class Posting(unittest.TestCase):
     def setUp(self):

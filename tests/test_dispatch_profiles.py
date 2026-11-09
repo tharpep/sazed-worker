@@ -29,6 +29,7 @@ TABLE = {
     "verify": ("haiku", "max", 0.5, 600, True, True),
     "implement": ("sonnet", "high", 2.0, 1200, False, False),
     "design": ("opus", "xhigh", 4.0, 1200, False, False),
+    "flash": ("gemini-3.8-flash-high", "high", 0.5, 1200, False, False),
 }
 
 
@@ -135,6 +136,12 @@ class Sources(Env):
         data = json.loads(out.getvalue())
         self.assertEqual(data["source"], "builtin")
         self.assertEqual(set(data["profiles"]), set(TABLE))
+
+    def test_flash_profile_resolves_with_agy_engine(self):
+        """Proves the flash profile specifies the agy execution engine and model."""
+        got = resolve(Task(id="f", goal="g", done="d", profile="flash"), {})
+        self.assertEqual(got["engine"], "agy")
+        self.assertEqual(got["model"], "gemini-3.8-flash-high")
 
 
 class Evidence(Env):
