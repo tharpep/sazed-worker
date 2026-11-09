@@ -212,7 +212,11 @@ def _reads(event: dict[str, Any]) -> int:
     if event.get("event") == "step_update":
         update = event.get("step_update") or {}
         if update.get("step_type") in ("tool", "tool_call") and update.get("state") == "ACTIVE":
-            name = update.get("tool_name") or (update.get("tool_info") or {}).get("name", "")
+            name = (
+                update.get("tool_name")
+                or (update.get("tool_info") or {}).get("name")
+                or (update.get("tool_call") or {}).get("name", "")
+            )
             if name in EVIDENCE_TOOLS:
                 return 1
     return 0

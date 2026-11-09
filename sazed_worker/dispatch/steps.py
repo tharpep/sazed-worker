@@ -54,7 +54,11 @@ def event_steps(event: dict[str, Any], worktree: str) -> list[dict[str, Any]]:
         step_type = update.get("step_type")
         state = update.get("state")
         if step_type in ("tool", "tool_call") and state == "ACTIVE":
-            tool = update.get("tool_name") or (update.get("tool_info") or {}).get("name")
+            tool = (
+                update.get("tool_name")
+                or (update.get("tool_info") or {}).get("name")
+                or (update.get("tool_call") or {}).get("name")
+            )
             params = (
                 (update.get("tool_info") or {}).get("parameters")
                 or (update.get("tool_call") or {}).get("arguments")
@@ -66,8 +70,9 @@ def event_steps(event: dict[str, Any], worktree: str) -> list[dict[str, Any]]:
         if step_type == "tool" and state == "DONE":
             output = (update.get("tool_info") or {}).get("output", "")
             if output:
+                is_err = bool(update.get("error") or (update.get("tool_info") or {}).get("error"))
                 text = _short(_first_line(output), worktree)
-                step = ("result", None, text, False)
+                step = ("result", None, text, is_err)
                 return [dict(zip(("kind", "tool", "text", "error"), step, strict=True))]
         if step_type == "tool_result":
             res = update.get("tool_result") or {}

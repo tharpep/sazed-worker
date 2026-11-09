@@ -75,6 +75,37 @@ class Converting(unittest.TestCase):
         ]
         self.assertEqual(steps, expected)
 
+    def test_an_agy_tool_call_dict_extracts_name_and_args(self):
+        """Proves tool name and arguments are extracted when under tool_call dictionary."""
+        event = {
+            "event": "step_update",
+            "step_update": {
+                "step_type": "tool_call",
+                "state": "ACTIVE",
+                "tool_call": {"name": "read_file", "arguments": {"Path": "src/a.py"}},
+            },
+        }
+        steps = event_steps(event, WT)
+        self.assertEqual(
+            steps, [{"kind": "tool", "tool": "read_file", "text": "src/a.py", "error": False}]
+        )
+
+    def test_an_agy_tool_done_carries_error_state(self):
+        """Proves a tool step done update carries the error flag from output or error field."""
+        event = {
+            "event": "step_update",
+            "step_update": {
+                "step_type": "tool",
+                "state": "DONE",
+                "error": True,
+                "tool_info": {"output": "command failed\nline 2"},
+            },
+        }
+        steps = event_steps(event, WT)
+        self.assertEqual(
+            steps, [{"kind": "result", "tool": None, "text": "command failed", "error": True}]
+        )
+
     def test_an_agy_tool_result_becomes_a_result_step(self):
         """Proves an agy tool result step update converts to a dispatch result step."""
         event = {

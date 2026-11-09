@@ -26,6 +26,10 @@ DENY = [
     "Write(.claude/**)",
     "Edit(.git/**)",
     "Write(.git/**)",
+    "Edit(.agents/**)",
+    "Write(.agents/**)",
+    "Edit(.gemini/**)",
+    "Write(.gemini/**)",
 ]
 
 

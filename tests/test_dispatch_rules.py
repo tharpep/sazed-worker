@@ -154,6 +154,8 @@ class HookInvocation(unittest.TestCase):
     def test_settings_carry_both_layers(self):
         self.assertIn("Bash", self.config["permissions"]["allow"])
         self.assertIn("Bash(git push:*)", self.config["permissions"]["deny"])
+        self.assertIn("Edit(.agents/**)", self.config["permissions"]["deny"])
+        self.assertIn("Edit(.gemini/**)", self.config["permissions"]["deny"])
         self.assertEqual(self.config["env"]["BASH_MAX_TIMEOUT_MS"], "300000")
         self.assertTrue(Path(settings.HOOK).exists())
         self.assertIn(sys.executable, self.config["hooks"]["PreToolUse"][1]["hooks"][0]["command"])
