@@ -127,7 +127,7 @@ class Engine(unittest.TestCase):
         self.assertEqual(states, {"api": "landed"})
         self.assertIn("src/api/api.txt", self.integ_files())
         wt_hooks = self.ws.task_dir("api") / ".agents" / "hooks.json"
-        self.assertTrue(wt_hooks.exists())
+        self.assertFalse(wt_hooks.exists())
 
     def test_a_waiting_task_carries_its_question_and_does_not_land(self):
         self.modes(docs="waiting")

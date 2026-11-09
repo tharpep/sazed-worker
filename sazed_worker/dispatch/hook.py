@@ -11,6 +11,8 @@ from sazed_worker.dispatch.rules import bash_reason, edit_reason  # noqa: E402
 
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 AGY_EDIT_TOOLS = (
+    "write_file",
+    "edit_file",
     "write_to_file",
     "replace_file_content",
     "multi_replace_file_content",

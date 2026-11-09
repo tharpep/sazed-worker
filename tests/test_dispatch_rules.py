@@ -188,6 +188,12 @@ class HookInvocation(unittest.TestCase):
         ok_edit = call("write_to_file", {"Path": str(self.wt / "src" / "index.ts")})
         self.assertEqual(ok_edit["decision"], "allow")
 
+        bad_write = call("write_file", {"Path": str(self.wt / "README.md")})
+        self.assertEqual(bad_write["decision"], "deny")
+
+        ok_edit_file = call("edit_file", {"Path": str(self.wt / "src" / "index.ts")})
+        self.assertEqual(ok_edit_file["decision"], "allow")
+
     def test_agy_hook_denies_commands_in_read_only_mode(self):
         """Proves the agy hook denies run_command and file edits when read-only is set."""
         agy_path = settings.build(

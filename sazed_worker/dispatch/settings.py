@@ -48,7 +48,8 @@ def build(
         dot_agents = worktree / ".agents"
         dot_agents.mkdir(parents=True, exist_ok=True)
         matcher = (
-            "write_to_file|replace_file_content|multi_replace_file_content|sed_file|notebook_edit"
+            "write_file|edit_file|write_to_file|replace_file_content|"
+            "multi_replace_file_content|sed_file|notebook_edit"
         )
         hooks = {
             "dispatch-guard": {
