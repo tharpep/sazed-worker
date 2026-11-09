@@ -94,14 +94,12 @@ class Workspace:
         return path
 
     def _exclude_agents(self) -> None:
-        exclude = self.repo / ".git" / "info" / "exclude"
-        if exclude.exists():
-            text = exclude.read_text()
-            if ".agents" not in text:
-                exclude.write_text(text.rstrip() + "\n.agents\n")
-        else:
-            exclude.parent.mkdir(parents=True, exist_ok=True)
-            exclude.write_text(".agents\n")
+        rel_exclude = git("rev-parse", "--git-path", "info/exclude", cwd=self.repo)
+        exclude = (self.repo / rel_exclude).resolve()
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        text = exclude.read_text() if exclude.exists() else ""
+        if ".agents" not in text:
+            exclude.write_text(text.rstrip() + ("\n.agents\n" if text else ".agents\n"))
 
     def commits(self, task_id: str) -> int:
         span = f"{self.integ_branch}..{self.task_branch(task_id)}"

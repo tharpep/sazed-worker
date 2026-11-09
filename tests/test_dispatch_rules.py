@@ -188,6 +188,25 @@ class HookInvocation(unittest.TestCase):
         ok_edit = call("write_to_file", {"Path": str(self.wt / "src" / "index.ts")})
         self.assertEqual(ok_edit["decision"], "allow")
 
+    def test_agy_hook_denies_commands_in_read_only_mode(self):
+        """Proves the agy hook denies run_command and file edits when read-only is set."""
+        agy_path = settings.build(
+            self.wt, [], self.tmp / "run_ro", timeout_s=300, engine="agy", read_only=True
+        )
+        cfg = json.loads(agy_path.read_text())
+        command = cfg["dispatch-guard"]["PreToolUse"][0]["hooks"][0]["command"]
+
+        def call(name: str, args: dict) -> dict:
+            payload = json.dumps({"toolCall": {"name": name, "args": args}})
+            out = subprocess.run(
+                command, shell=True, input=payload, capture_output=True, text=True, check=True
+            ).stdout
+            return json.loads(out)
+
+        cmd = call("run_command", {"CommandLine": "ls"})
+        self.assertEqual(cmd["decision"], "deny")
+        self.assertIn("read-only task", cmd["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

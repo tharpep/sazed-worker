@@ -109,23 +109,26 @@ def _agy() -> list[str]:
 
 
 def agent_command(
-    cfg: dict[str, Any], settings_path: Path, read_only: bool, mcp_args: list[str] | None = None
+    cfg: dict[str, Any],
+    settings_path: Path,
+    read_only: bool,
+    mcp_args: list[str] | None = None,
+    prompt: str | None = None,
 ) -> list[str]:
     if cfg.get("engine") == "agy":
-        return [
+        cmd = [
             *_agy(),
-            "-p",
-            "--output-format",
-            "stream-json",
-            "--model",
-            str(cfg["model"]),
-            "--effort",
-            str(cfg["effort"]),
+            "--output-format=stream-json",
+            f"--model={cfg['model']}",
+            f"--effort={cfg['effort']}",
             "--dangerously-skip-permissions",
             "--disable-slash-commands",
             "--json-schema",
             json.dumps(STATE_SCHEMA),
         ]
+        if prompt is not None:
+            cmd.append(f"--prompt={prompt}")
+        return cmd
     cmd = [
         *_claude(),
         "-p",
@@ -150,7 +153,10 @@ def agent_command(
     ]
     if read_only:
         cmd += ["--disallowedTools", READ_ONLY_TOOLS]
-    return cmd + (mcp_args or [])
+    cmd += mcp_args or []
+    if prompt is not None:
+        cmd += ["--", prompt]
+    return cmd
 
 
 def run_task(
@@ -167,10 +173,12 @@ def run_task(
     worktree = ws.create(task.id)
     run_dir = ws.home / "runs" / task.id
     engine = cfg.get("engine", "claude")
-    settings_path = agent_settings.build(worktree, task.owns, run_dir, timeout_s, engine=engine)
+    settings_path = agent_settings.build(
+        worktree, task.owns, run_dir, timeout_s, engine=engine, read_only=read_only
+    )
     granted = mcp.build(cfg.get("mcp") or {}, run_dir) if engine != "agy" else mcp.Grant()
-    cmd = agent_command(cfg, settings_path, read_only, granted.args)
-    cmd += ["--", prompt_for(plan, task, read_only, check)]
+    prompt = prompt_for(plan, task, read_only, check)
+    cmd = agent_command(cfg, settings_path, read_only, granted.args, prompt=prompt)
     env = os.environ | {
         "DISPATCH_TASK": task.id,
         "DISPATCH_OWNS": json.dumps(task.owns),
@@ -203,7 +211,7 @@ def _reads(event: dict[str, Any]) -> int:
         )
     if event.get("event") == "step_update":
         update = event.get("step_update") or {}
-        if update.get("step_type") == "tool":
+        if update.get("step_type") in ("tool", "tool_call") and update.get("state") == "ACTIVE":
             name = update.get("tool_name") or (update.get("tool_info") or {}).get("name", "")
             if name in EVIDENCE_TOOLS:
                 return 1

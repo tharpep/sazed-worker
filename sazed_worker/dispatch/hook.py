@@ -19,19 +19,31 @@ AGY_EDIT_TOOLS = (
 )
 
 
-def reason_for(event: dict, worktree: str, owns: list[str]) -> str | None:
+def reason_for(
+    event: dict, worktree: str, owns: list[str], read_only: bool = False
+) -> str | None:
     if "toolCall" in event:
         call = event.get("toolCall") or {}
         tool = call.get("name", "")
         args = call.get("args") or {}
+        if read_only and (tool == "run_command" or tool in AGY_EDIT_TOOLS):
+            return "this is a read-only task: you change no files"
         if tool == "run_command":
             return bash_reason(args.get("CommandLine", ""), worktree)
         if tool in AGY_EDIT_TOOLS:
-            path = args.get("Path") or args.get("notebook_path") or args.get("file_path") or ""
+            path = (
+                args.get("Path")
+                or args.get("path")
+                or args.get("notebook_path")
+                or args.get("file_path")
+                or ""
+            )
             return edit_reason(path, owns, worktree)
         return None
     tool = event.get("tool_name", "")
     args = event.get("tool_input") or {}
+    if read_only and (tool == "Bash" or tool in EDIT_TOOLS):
+        return "this is a read-only task: you change no files"
     if tool == "Bash":
         return bash_reason(args.get("command", ""), worktree)
     if tool in EDIT_TOOLS:
@@ -44,13 +56,14 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--worktree", required=True)
     parser.add_argument("--owns-file", required=True)
+    parser.add_argument("--read-only", action="store_true")
     args = parser.parse_args()
     owns = json.loads(Path(args.owns_file).read_text())
     try:
         event = json.load(sys.stdin)
     except ValueError:
         return
-    reason = reason_for(event, args.worktree, owns)
+    reason = reason_for(event, args.worktree, owns, read_only=args.read_only)
     is_agy = "toolCall" in event
     if reason:
         if is_agy:

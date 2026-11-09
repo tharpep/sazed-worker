@@ -30,13 +30,19 @@ DENY = [
 
 
 def build(
-    worktree: Path, owns: list[str], run_dir: Path, timeout_s: int, engine: str = "claude"
+    worktree: Path,
+    owns: list[str],
+    run_dir: Path,
+    timeout_s: int,
+    engine: str = "claude",
+    read_only: bool = False,
 ) -> Path:
     """Write the settings and owns files into run_dir and return the settings path."""
     run_dir.mkdir(parents=True, exist_ok=True)
     owns_file = run_dir / "owns.json"
     owns_file.write_text(json.dumps(owns))
-    command = f'"{sys.executable}" "{HOOK}" --worktree "{worktree}" --owns-file "{owns_file}"'
+    ro = " --read-only" if read_only else ""
+    command = f'"{sys.executable}" "{HOOK}" --worktree "{worktree}" --owns-file "{owns_file}"{ro}'
     hook = [{"type": "command", "command": command}]
     if engine == "agy":
         dot_agents = worktree / ".agents"
