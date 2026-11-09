@@ -8,9 +8,25 @@ from pathlib import Path
 from typing import Any
 
 TIMEOUT_S = 3
-KEYS = ("model", "effort", "budget_usd", "timeout_s", "read_only", "evidence_required", "mcp")
+KEYS = (
+    "model",
+    "effort",
+    "budget_usd",
+    "timeout_s",
+    "read_only",
+    "evidence_required",
+    "mcp",
+    "engine",
+)
 
-_CHEAP = {"model": "haiku", "budget_usd": 0.5, "timeout_s": 600, "read_only": True, "mcp": {}}
+_CHEAP = {
+    "model": "haiku",
+    "budget_usd": 0.5,
+    "timeout_s": 600,
+    "read_only": True,
+    "mcp": {},
+    "engine": "claude",
+}
 
 BUILTIN: dict[str, dict[str, Any]] = {
     "smoke": {**_CHEAP, "effort": "medium"},
@@ -22,8 +38,24 @@ BUILTIN: dict[str, dict[str, Any]] = {
         "budget_usd": 2.0,
         "timeout_s": 1200,
         "mcp": {},
+        "engine": "claude",
     },
-    "design": {"model": "opus", "effort": "xhigh", "budget_usd": 4.0, "timeout_s": 1200, "mcp": {}},
+    "design": {
+        "model": "opus",
+        "effort": "xhigh",
+        "budget_usd": 4.0,
+        "timeout_s": 1200,
+        "mcp": {},
+        "engine": "claude",
+    },
+    "flash": {
+        "model": "gemini-3.8-flash-high",
+        "effort": "high",
+        "budget_usd": 0.5,
+        "timeout_s": 1200,
+        "mcp": {},
+        "engine": "agy",
+    },
 }
 
 _active: tuple[dict[str, dict[str, Any]], str] = (BUILTIN, "builtin")

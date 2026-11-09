@@ -90,7 +90,16 @@ class Workspace:
             self.tip(),
             cwd=self.repo,
         )
+        self._exclude_agents()
         return path
+
+    def _exclude_agents(self) -> None:
+        rel_exclude = git("rev-parse", "--git-path", "info/exclude", cwd=self.repo)
+        exclude = (self.repo / rel_exclude).resolve()
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        text = exclude.read_text() if exclude.exists() else ""
+        if ".agents" not in text:
+            exclude.write_text(text.rstrip() + ("\n.agents\n" if text else ".agents\n"))
 
     def commits(self, task_id: str) -> int:
         span = f"{self.integ_branch}..{self.task_branch(task_id)}"
@@ -104,6 +113,7 @@ class Workspace:
     def land(self, task_id: str, check: str, regen: str | None, timeout_s: int) -> Landing:
         before = self.tip()
         task_dir = self.task_dir(task_id)
+        self._cleanup_hooks(task_dir)
         rebase = subprocess.run(
             ["git", "rebase", "-q", self.integ_branch], cwd=task_dir, capture_output=True, text=True
         )
@@ -124,6 +134,16 @@ class Workspace:
             self._reset(before)
             return Landing("failed", f"check failed after landing: {out[-300:]}")
         return Landing("landed", f"landed on {self.integ_branch}", self.tip())
+
+    def _cleanup_hooks(self, task_dir: Path) -> None:
+        hook_file = task_dir / ".agents" / "hooks.json"
+        if hook_file.exists():
+            hook_file.unlink()
+            git("checkout", "-q", "--", ".agents/hooks.json", cwd=task_dir, check=False)
+            try:
+                (task_dir / ".agents").rmdir()
+            except OSError:
+                pass
 
     def _reset(self, sha: str) -> None:
         git("reset", "-q", "--hard", sha, cwd=self.integ_dir)

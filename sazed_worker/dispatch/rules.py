@@ -10,7 +10,7 @@ _ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _TOKEN_ASSIGN = re.compile(r"\b[A-Za-z_]*(TOKEN|SECRET|PASSWORD|API_KEY)[A-Za-z_]*=", re.IGNORECASE)
 _PIPE_TO_SHELL = re.compile(r"\|\s*(sudo\s+)?(ba|z|da)?sh\b")
 _GIT_VALUE_FLAGS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
-_PROTECTED = (".claude", ".git")
+_PROTECTED = (".claude", ".git", ".agents", ".gemini")
 _RC_FILES = {".bashrc", ".zshrc", ".profile", ".bash_profile", ".zprofile", ".inputrc"}
 
 
@@ -78,8 +78,8 @@ def bash_reason(command: str, worktree: str) -> str | None:
             reason = "agents do not open PRs or call the GitHub API; the integrator does"
         elif head in ("pkill", "killall"):
             reason = "do not kill processes by name"
-        elif head == "claude" and words[1:2] in (["plugin"], ["mcp"], ["config"]):
-            reason = "agents do not change Claude Code's setup"
+        elif head in ("claude", "agy") and words[1:2] in (["plugin"], ["mcp"], ["config"]):
+            reason = f"agents do not change {head}'s setup"
         elif head == "cd":
             reason = _cd_reason(words, worktree)
         else:

@@ -36,6 +36,8 @@ REFUSED = [
     "export GITHUB_TOKEN=abc",
     "claude plugin install x",
     "claude mcp add x",
+    "agy plugin install x",
+    "agy mcp add x",
     "cd /etc",
     "cd ~",
     "cd /work/treehouse",
@@ -88,6 +90,8 @@ class EditRules(unittest.TestCase):
             "tests/test_app.py": "outside this task's owns",
             ".claude/settings.json": "do not edit .claude/",
             ".git/hooks/pre-commit": "do not edit .git/",
+            ".agents/hooks.json": "do not edit .agents/",
+            ".gemini/config.json": "do not edit .gemini/",
             "src/parser/../../README.md": "outside this task's owns",
             "/etc/passwd": "stay inside your worktree",
             "../other/x.py": "stay inside your worktree",
@@ -150,9 +154,66 @@ class HookInvocation(unittest.TestCase):
     def test_settings_carry_both_layers(self):
         self.assertIn("Bash", self.config["permissions"]["allow"])
         self.assertIn("Bash(git push:*)", self.config["permissions"]["deny"])
+        self.assertIn("Edit(.agents/**)", self.config["permissions"]["deny"])
+        self.assertIn("Edit(.gemini/**)", self.config["permissions"]["deny"])
         self.assertEqual(self.config["env"]["BASH_MAX_TIMEOUT_MS"], "300000")
         self.assertTrue(Path(settings.HOOK).exists())
         self.assertIn(sys.executable, self.config["hooks"]["PreToolUse"][1]["hooks"][0]["command"])
+
+    def test_agy_hook_denies_push_and_unowned_edits(self):
+        """Proves the hook denies git push and unowned edits under the agy PreToolUse contract."""
+        agy_path = settings.build(
+            self.wt, ["src/**"], self.tmp / "run", timeout_s=300, engine="agy"
+        )
+        self.assertTrue(agy_path.exists())
+        cfg = json.loads(agy_path.read_text())
+        command = cfg["dispatch-guard"]["PreToolUse"][0]["hooks"][0]["command"]
+
+        def call(name: str, args: dict) -> dict:
+            payload = json.dumps({"toolCall": {"name": name, "args": args}})
+            out = subprocess.run(
+                command, shell=True, input=payload, capture_output=True, text=True, check=True
+            ).stdout
+            return json.loads(out)
+
+        push = call("run_command", {"CommandLine": "git push origin main"})
+        self.assertEqual(push["decision"], "deny")
+        self.assertIn("do not push", push["reason"])
+
+        ok_cmd = call("run_command", {"CommandLine": "git status"})
+        self.assertEqual(ok_cmd["decision"], "allow")
+
+        bad_edit = call("replace_file_content", {"Path": str(self.wt / "README.md")})
+        self.assertEqual(bad_edit["decision"], "deny")
+        self.assertIn("finish with state waiting", bad_edit["reason"])
+
+        ok_edit = call("write_to_file", {"Path": str(self.wt / "src" / "index.ts")})
+        self.assertEqual(ok_edit["decision"], "allow")
+
+        bad_write = call("write_file", {"Path": str(self.wt / "README.md")})
+        self.assertEqual(bad_write["decision"], "deny")
+
+        ok_edit_file = call("edit_file", {"Path": str(self.wt / "src" / "index.ts")})
+        self.assertEqual(ok_edit_file["decision"], "allow")
+
+    def test_agy_hook_denies_commands_in_read_only_mode(self):
+        """Proves the agy hook denies run_command and file edits when read-only is set."""
+        agy_path = settings.build(
+            self.wt, [], self.tmp / "run_ro", timeout_s=300, engine="agy", read_only=True
+        )
+        cfg = json.loads(agy_path.read_text())
+        command = cfg["dispatch-guard"]["PreToolUse"][0]["hooks"][0]["command"]
+
+        def call(name: str, args: dict) -> dict:
+            payload = json.dumps({"toolCall": {"name": name, "args": args}})
+            out = subprocess.run(
+                command, shell=True, input=payload, capture_output=True, text=True, check=True
+            ).stdout
+            return json.loads(out)
+
+        cmd = call("run_command", {"CommandLine": "ls"})
+        self.assertEqual(cmd["decision"], "deny")
+        self.assertIn("read-only task", cmd["reason"])
 
 
 if __name__ == "__main__":

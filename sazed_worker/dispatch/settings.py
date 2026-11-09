@@ -26,16 +26,46 @@ DENY = [
     "Write(.claude/**)",
     "Edit(.git/**)",
     "Write(.git/**)",
+    "Edit(.agents/**)",
+    "Write(.agents/**)",
+    "Edit(.gemini/**)",
+    "Write(.gemini/**)",
 ]
 
 
-def build(worktree: Path, owns: list[str], run_dir: Path, timeout_s: int) -> Path:
+def build(
+    worktree: Path,
+    owns: list[str],
+    run_dir: Path,
+    timeout_s: int,
+    engine: str = "claude",
+    read_only: bool = False,
+) -> Path:
     """Write the settings and owns files into run_dir and return the settings path."""
     run_dir.mkdir(parents=True, exist_ok=True)
     owns_file = run_dir / "owns.json"
     owns_file.write_text(json.dumps(owns))
-    command = f'"{sys.executable}" "{HOOK}" --worktree "{worktree}" --owns-file "{owns_file}"'
+    ro = " --read-only" if read_only else ""
+    command = f'"{sys.executable}" "{HOOK}" --worktree "{worktree}" --owns-file "{owns_file}"{ro}'
     hook = [{"type": "command", "command": command}]
+    if engine == "agy":
+        dot_agents = worktree / ".agents"
+        dot_agents.mkdir(parents=True, exist_ok=True)
+        matcher = (
+            "write_file|edit_file|write_to_file|replace_file_content|"
+            "multi_replace_file_content|sed_file|notebook_edit"
+        )
+        hooks = {
+            "dispatch-guard": {
+                "PreToolUse": [
+                    {"matcher": "run_command", "hooks": hook},
+                    {"matcher": matcher, "hooks": hook},
+                ]
+            }
+        }
+        path = dot_agents / "hooks.json"
+        path.write_text(json.dumps(hooks, indent=2))
+        return path
     timeout_ms = str(timeout_s * 1000)
     settings = {
         "permissions": {"allow": ALLOW, "deny": DENY},

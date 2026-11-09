@@ -26,8 +26,18 @@ def main() -> None:
     task = os.environ["DISPATCH_TASK"]
     owns = json.loads(os.environ.get("DISPATCH_OWNS", "[]"))
     mode = json.loads(os.environ.get("DISPATCH_FAKE_MODES", "{}")).get(task, "inside")
+    is_agy = (
+        os.environ.get("DISPATCH_ENGINE") == "agy" or "--dangerously-skip-permissions" in sys.argv
+    )
     session = str(uuid.uuid4())
-    print(json.dumps({"type": "system", "subtype": "init", "session_id": session}), flush=True)
+    if is_agy:
+        print(
+            json.dumps({"event": "init", "init": {"model": "gemini-3.8-flash-high"}}), flush=True
+        )
+    else:
+        print(
+            json.dumps({"type": "system", "subtype": "init", "session_id": session}), flush=True
+        )
     state, extra = "done", {}
     if mode == "inside":
         _commit(_target(owns, task), f"{task}\n", f"{task}: work")
@@ -40,24 +50,57 @@ def main() -> None:
     elif mode == "waiting":
         state, extra = "waiting", {"question": "Which file holds the shared type?"}
     elif mode == "reads":
-        block = {"type": "tool_use", "name": "Read", "input": {"file_path": "README.md"}}
-        print(json.dumps({"type": "assistant", "message": {"content": [block]}}), flush=True)
+        if is_agy:
+            print(
+                json.dumps(
+                    {
+                        "event": "step_update",
+                        "step_update": {
+                            "step_index": 1,
+                            "state": "ACTIVE",
+                            "step_type": "tool",
+                            "tool_name": "view_file",
+                        },
+                    }
+                ),
+                flush=True,
+            )
+        else:
+            block = {"type": "tool_use", "name": "Read", "input": {"file_path": "README.md"}}
+            print(json.dumps({"type": "assistant", "message": {"content": [block]}}), flush=True)
     elif mode == "hang":
         time.sleep(600)
-    print(
-        json.dumps(
-            {
-                "type": "result",
-                "subtype": "success",
-                "is_error": False,
-                "session_id": session,
-                "total_cost_usd": 0.0,
-                "num_turns": 1,
-                "structured_output": {"state": state, "summary": f"{task} {mode}"} | extra,
-            }
-        ),
-        flush=True,
-    )
+    if is_agy:
+        print(
+            json.dumps(
+                {
+                    "event": "result",
+                    "result": {
+                        "status": "SUCCESS",
+                        "conversation_id": session,
+                        "num_turns": 1,
+                        "structured_output": {"state": state, "summary": f"{task} {mode}"}
+                        | extra,
+                    },
+                }
+            ),
+            flush=True,
+        )
+    else:
+        print(
+            json.dumps(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "session_id": session,
+                    "total_cost_usd": 0.0,
+                    "num_turns": 1,
+                    "structured_output": {"state": state, "summary": f"{task} {mode}"} | extra,
+                }
+            ),
+            flush=True,
+        )
     sys.exit(0)
 
 

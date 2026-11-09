@@ -27,7 +27,16 @@ STATE_SCHEMA = {
     "required": ["state", "summary"],
 }
 
-EVIDENCE_TOOLS = ("Read", "Grep", "Glob")
+EVIDENCE_TOOLS = (
+    "Read",
+    "Grep",
+    "Glob",
+    "view_file",
+    "read_file",
+    "grep_search",
+    "find_by_name",
+    "list_dir",
+)
 READ_ONLY_TOOLS = "Edit,Write,MultiEdit,NotebookEdit,Bash"
 
 PROMPT = """You are one task in the dispatch plan {plan}. Task {task}: {goal}
@@ -95,9 +104,31 @@ def _claude() -> list[str]:
     return shlex.split(os.environ.get("DISPATCH_CLAUDE", "claude"))
 
 
+def _agy() -> list[str]:
+    return shlex.split(os.environ.get("DISPATCH_AGY", "agy"))
+
+
 def agent_command(
-    cfg: dict[str, Any], settings_path: Path, read_only: bool, mcp_args: list[str] | None = None
+    cfg: dict[str, Any],
+    settings_path: Path,
+    read_only: bool,
+    mcp_args: list[str] | None = None,
+    prompt: str | None = None,
 ) -> list[str]:
+    if cfg.get("engine") == "agy":
+        cmd = [
+            *_agy(),
+            "--output-format=stream-json",
+            f"--model={cfg['model']}",
+            f"--effort={cfg['effort']}",
+            "--dangerously-skip-permissions",
+            "--disable-slash-commands",
+            "--json-schema",
+            json.dumps(STATE_SCHEMA),
+        ]
+        if prompt is not None:
+            cmd.append(f"--prompt={prompt}")
+        return cmd
     cmd = [
         *_claude(),
         "-p",
@@ -122,7 +153,10 @@ def agent_command(
     ]
     if read_only:
         cmd += ["--disallowedTools", READ_ONLY_TOOLS]
-    return cmd + (mcp_args or [])
+    cmd += mcp_args or []
+    if prompt is not None:
+        cmd += ["--", prompt]
+    return cmd
 
 
 def run_task(
@@ -138,14 +172,18 @@ def run_task(
     check = task.check or plan.check or config.get("check")
     worktree = ws.create(task.id)
     run_dir = ws.home / "runs" / task.id
-    settings_path = agent_settings.build(worktree, task.owns, run_dir, timeout_s)
-    granted = mcp.build(cfg.get("mcp") or {}, run_dir)
-    cmd = agent_command(cfg, settings_path, read_only, granted.args)
-    cmd += ["--", prompt_for(plan, task, read_only, check)]
+    engine = cfg.get("engine", "claude")
+    settings_path = agent_settings.build(
+        worktree, task.owns, run_dir, timeout_s, engine=engine, read_only=read_only
+    )
+    granted = mcp.build(cfg.get("mcp") or {}, run_dir) if engine != "agy" else mcp.Grant()
+    prompt = prompt_for(plan, task, read_only, check)
+    cmd = agent_command(cfg, settings_path, read_only, granted.args, prompt=prompt)
     env = os.environ | {
         "DISPATCH_TASK": task.id,
         "DISPATCH_OWNS": json.dumps(task.owns),
         "DISPATCH_WORKTREE": str(worktree),
+        "DISPATCH_ENGINE": engine,
     }
     board.write(
         task.id,
@@ -161,15 +199,27 @@ def run_task(
 
 
 def _reads(event: dict[str, Any]) -> int:
-    if event.get("type") != "assistant":
-        return 0
-    content = (event.get("message") or {}).get("content")
-    blocks = content if isinstance(content, list) else []
-    return sum(
-        1
-        for b in blocks
-        if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in EVIDENCE_TOOLS
-    )
+    if event.get("type") == "assistant":
+        content = (event.get("message") or {}).get("content")
+        blocks = content if isinstance(content, list) else []
+        return sum(
+            1
+            for b in blocks
+            if isinstance(b, dict)
+            and b.get("type") == "tool_use"
+            and b.get("name") in EVIDENCE_TOOLS
+        )
+    if event.get("event") == "step_update":
+        update = event.get("step_update") or {}
+        if update.get("step_type") in ("tool", "tool_call") and update.get("state") == "ACTIVE":
+            name = (
+                update.get("tool_name")
+                or (update.get("tool_info") or {}).get("name")
+                or (update.get("tool_call") or {}).get("name", "")
+            )
+            if name in EVIDENCE_TOOLS:
+                return 1
+    return 0
 
 
 class ReadingSender:
@@ -247,7 +297,14 @@ def _run(
                 pass
             proc.wait()
             reader.join(timeout=5)
-    result = next((e for e in reversed(events) if e.get("type") == "result"), None)
+    result = next(
+        (
+            e.get("result", e)
+            for e in reversed(events)
+            if e.get("type") == "result" or e.get("event") == "result"
+        ),
+        None,
+    )
     return {
         "code": proc.returncode,
         "timed_out": timed_out,
@@ -268,8 +325,8 @@ def _finish(
 ) -> dict[str, Any]:
     result = outcome["result"] or {}
     common = {
-        "cost_usd": result.get("total_cost_usd"),
-        "session": result.get("session_id"),
+        "cost_usd": result.get("total_cost_usd", 0.0),
+        "session": result.get("session_id") or result.get("conversation_id"),
         "exit": outcome["code"],
         "turns": result.get("num_turns"),
     }

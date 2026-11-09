@@ -58,6 +58,7 @@ class Engine(unittest.TestCase):
         self.env = {
             "DISPATCH_HOME": str(self.tmp / "home"),
             "DISPATCH_CLAUDE": f"{sys.executable} {FAKE}",
+            "DISPATCH_AGY": f"{sys.executable} {FAKE}",
             "DISPATCH_FAKE_MODES": "{}",
         }
         self._old = {k: os.environ.get(k) for k in self.env}
@@ -111,6 +112,22 @@ class Engine(unittest.TestCase):
         self.modes(docs="nocommit")
         integrate.go(_plan(), self.ws, self.board, "main")
         self.assertIn("made no commits", self.board.rows("docs")[-1]["line"])
+
+    def test_flash_task_runs_with_agy_and_lands_clean(self):
+        """Proves a task with the flash profile runs under agy, commits, and lands."""
+        task = Task(
+            id="api",
+            goal="build api",
+            done="api file",
+            owns=["src/api/**"],
+            profile="flash",
+        )
+        plan = Plan(id="p1", tasks=[task], check=CHECK)
+        states = integrate.go(plan, self.ws, self.board, "main")
+        self.assertEqual(states, {"api": "landed"})
+        self.assertIn("src/api/api.txt", self.integ_files())
+        wt_hooks = self.ws.task_dir("api") / ".agents" / "hooks.json"
+        self.assertFalse(wt_hooks.exists())
 
     def test_a_waiting_task_carries_its_question_and_does_not_land(self):
         self.modes(docs="waiting")
