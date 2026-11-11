@@ -299,7 +299,7 @@ def _run(
             reader.join(timeout=5)
     result = next(
         (
-            e.get("result", e)
+            e["result"] if isinstance(e.get("result"), dict) else e
             for e in reversed(events)
             if e.get("type") == "result" or e.get("event") == "result"
         ),
