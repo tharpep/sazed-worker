@@ -94,6 +94,7 @@ def main() -> None:
                     "subtype": "success",
                     "is_error": False,
                     "session_id": session,
+                    "result": f"{task} {mode}",
                     "total_cost_usd": 0.0,
                     "num_turns": 1,
                     "structured_output": {"state": state, "summary": f"{task} {mode}"} | extra,
