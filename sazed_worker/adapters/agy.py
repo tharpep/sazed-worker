@@ -58,7 +58,14 @@ def handle_event(run: "Run", event: dict[str, Any]) -> None:
     step = event.get("step_update")
     done_tool = isinstance(step, dict) and step.get("step_type") == "tool"
     if done_tool and step.get("state") == "DONE":
-        run.count_tool(str(step.get("tool_name") or "?"))
+        tool_name = str(step.get("tool_name") or "?")
+        if tool_name == "call_mcp_tool":
+            info = step.get("tool_info")
+            params = info.get("parameters") if isinstance(info, dict) else None
+            mcp_tool = params.get("ToolName") if isinstance(params, dict) else None
+            if mcp_tool:
+                tool_name = str(mcp_tool)
+        run.count_tool(tool_name)
     if event.get("event") == "result" and isinstance(event.get("result"), dict):
         r = event["result"]
         run.session_id = r.get("conversation_id") or run.session_id

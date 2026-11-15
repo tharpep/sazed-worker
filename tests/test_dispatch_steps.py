@@ -75,6 +75,30 @@ class Converting(unittest.TestCase):
         ]
         self.assertEqual(steps, expected)
 
+    def test_an_agy_call_mcp_tool_extracts_inner_tool_name_and_args(self):
+        """Proves call_mcp_tool resolves to the inner ToolName and its first argument."""
+        event = {
+            "event": "step_update",
+            "step_update": {
+                "step_type": "tool",
+                "state": "ACTIVE",
+                "tool_name": "call_mcp_tool",
+                "tool_info": {
+                    "name": "call_mcp_tool",
+                    "parameters": {
+                        "Arguments": {"group": "infra"},
+                        "ServerName": "api-gateway",
+                        "ToolName": "homelab_services",
+                    },
+                },
+            },
+        }
+        steps = event_steps(event, WT)
+        expected = [
+            {"kind": "tool", "tool": "homelab_services", "text": "infra", "error": False}
+        ]
+        self.assertEqual(steps, expected)
+
     def test_an_agy_tool_call_dict_extracts_name_and_args(self):
         """Proves tool name and arguments are extracted when under tool_call dictionary."""
         event = {
