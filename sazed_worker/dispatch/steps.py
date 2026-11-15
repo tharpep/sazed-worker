@@ -65,7 +65,7 @@ def event_steps(event: dict[str, Any], worktree: str) -> list[dict[str, Any]]:
                 or {}
             )
             if tool == "call_mcp_tool" and isinstance(params, dict) and params.get("ToolName"):
-                tool = params["ToolName"]
+                tool = str(params["ToolName"])
                 args = params.get("Arguments")
                 first = next(iter(args.values()), "") if isinstance(args, dict) and args else ""
             else:
