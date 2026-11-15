@@ -83,7 +83,7 @@ It copies `worker.py`, the `sazed_worker` package and the unit to CT 110 over SS
 
 ## Setup notes
 
-- **agy:** headless runs need `read_url(*)` in `permissions.allow` in `~worker/.gemini/antigravity-cli/settings.json`; otherwise reading a page is refused and the answer comes back empty. Shell commands stay refused. Its Google sign-in is cached in `~worker/.gemini/antigravity-cli/antigravity-oauth-token`.
+- **agy:** headless runs need `read_url(*)` and `mcp(*)` in `permissions.allow` in `~worker/.gemini/antigravity-cli/settings.json`. Otherwise reading a page or calling an MCP tool is refused. Shell commands stay refused. MCP servers (such as `api-gateway`) are configured in `~worker/.gemini/config/mcp_config.json`. Its Google sign-in is cached in `~worker/.gemini/antigravity-cli/antigravity-oauth-token`.
 - **Claude Code:** don't run it with `--bare`, which ignores `CLAUDE_CODE_OAUTH_TOKEN`.
 
 The full design is in plans/07 of the My-AI workspace.

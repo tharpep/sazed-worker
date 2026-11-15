@@ -64,7 +64,12 @@ def event_steps(event: dict[str, Any], worktree: str) -> list[dict[str, Any]]:
                 or (update.get("tool_call") or {}).get("arguments")
                 or {}
             )
-            first = next(iter(params.values()), "") if isinstance(params, dict) else ""
+            if tool == "call_mcp_tool" and isinstance(params, dict) and params.get("ToolName"):
+                tool = params["ToolName"]
+                args = params.get("Arguments")
+                first = next(iter(args.values()), "") if isinstance(args, dict) and args else ""
+            else:
+                first = next(iter(params.values()), "") if isinstance(params, dict) else ""
             step = ("tool", tool, _short(str(first), worktree), False)
             return [dict(zip(("kind", "tool", "text", "error"), step, strict=True))]
         if step_type == "tool" and state == "DONE":
