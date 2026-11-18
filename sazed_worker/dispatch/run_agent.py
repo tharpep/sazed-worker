@@ -38,6 +38,8 @@ EVIDENCE_TOOLS = (
     "list_dir",
 )
 READ_ONLY_TOOLS = "Edit,Write,MultiEdit,NotebookEdit,Bash"
+# Sazed's reaper fails a running task after DISPATCH_HEARTBEAT_GRACE_S (150 s) without one.
+HEARTBEAT_S = 30
 
 PROMPT = """You are one task in the dispatch plan {plan}. Task {task}: {goal}
 
@@ -222,6 +224,11 @@ def _reads(event: dict[str, Any]) -> int:
     return 0
 
 
+def _beat(mirror: Mirror, task: str, stop: threading.Event) -> None:
+    while not stop.wait(HEARTBEAT_S):
+        mirror.heartbeat(task)
+
+
 class ReadingSender:
     """Mirrors the plan windows from rate_limit_event, once per change in their utilization."""
 
@@ -286,11 +293,16 @@ def _run(
 
         reader = threading.Thread(target=pump, daemon=True)
         reader.start()
+        stop_beats = threading.Event()
+        if mirror:
+            args = (mirror, task, stop_beats)
+            threading.Thread(target=_beat, args=args, daemon=True).start()
         try:
             proc.wait(timeout=timeout_s)
         except subprocess.TimeoutExpired:
             timed_out = True
         finally:
+            stop_beats.set()
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:

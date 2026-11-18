@@ -35,26 +35,41 @@ class Mirror:
         base = os.environ.get("DISPATCH_SAZED_URL")
         return cls(base, plan_id, os.environ.get("DISPATCH_SAZED_KEY")) if base else None
 
-    def _post(self, path: str, body: dict[str, Any]) -> None:
-        if self.failed:
-            return
+    def _send(self, path: str, body: dict[str, Any]) -> None:
         headers = {"Content-Type": "application/json"}
         if self.key:
             headers["X-API-Key"] = self.key
         req = urllib.request.Request(
             f"{self.base}{path}", json.dumps(body).encode(), headers, method="POST"
         )
+        urllib.request.urlopen(req, timeout=TIMEOUT_S).close()
+
+    def _post(self, path: str, body: dict[str, Any], always: bool = False) -> None:
+        if self.failed and not always:
+            return
         try:
-            urllib.request.urlopen(req, timeout=TIMEOUT_S).close()
+            self._send(path, body)
         except Exception as e:
+            if not self.failed:
+                print(
+                    f"dispatch: mirror to {self.base} failed, run sync later: {e}",
+                    file=sys.stderr,
+                )
             self.failed = True
-            print(
-                f"dispatch: mirror to {self.base} failed, run sync later: {e}",
-                file=sys.stderr,
-            )
 
     def row(self, row: dict[str, Any]) -> None:
-        self._post("/dispatch/rows", {"plan": self.plan_id, **row})
+        # A settled row is tried even after a failure: the task's beats reach Sazed regardless,
+        # so a missing final row would let the reaper fail a task that finished.
+        settled = row["state"] != "running"
+        self._post("/dispatch/rows", {"plan": self.plan_id, **row}, always=settled)
+
+    def heartbeat(self, task: str) -> None:
+        """Never raises, and ignores the failed flag: one blip must not stop the beats and get a
+        healthy task reaped, and an unreachable Sazed must not fail the task (seam 4)."""
+        try:
+            self._send("/dispatch/heartbeat", {"plan": self.plan_id, "task": task})
+        except Exception:
+            pass
 
     def reading(self, info: dict[str, Any]) -> None:
         body = {"machine": socket.gethostname(), "rate_limit_info": info}
