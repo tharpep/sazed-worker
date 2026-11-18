@@ -6,7 +6,6 @@ import shlex
 import signal
 import subprocess
 import threading
-import time
 from pathlib import Path
 from typing import Any
 
@@ -225,11 +224,8 @@ def _reads(event: dict[str, Any]) -> int:
     return 0
 
 
-def _beat(mirror: Mirror, task: str, stop: threading.Event, timeout_s: int) -> None:
-    """Beat until the agent exits or its time cap passes: a run still going past its cap is
-    stuck, and silence lets Sazed reap it."""
-    until = time.monotonic() + timeout_s
-    while not stop.wait(HEARTBEAT_S) and time.monotonic() < until:
+def _beat(mirror: Mirror, task: str, stop: threading.Event) -> None:
+    while not stop.wait(HEARTBEAT_S):
         mirror.heartbeat(task)
 
 
@@ -299,7 +295,7 @@ def _run(
         reader.start()
         stop_beats = threading.Event()
         if mirror:
-            args = (mirror, task, stop_beats, timeout_s)
+            args = (mirror, task, stop_beats)
             threading.Thread(target=_beat, args=args, daemon=True).start()
         try:
             proc.wait(timeout=timeout_s)

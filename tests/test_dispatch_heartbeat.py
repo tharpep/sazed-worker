@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from sazed_worker.dispatch import run_agent
+from sazed_worker.dispatch.board import Board
 from sazed_worker.dispatch.mirror import Mirror
 from tests.test_dispatch_mirror import Recorder
 
@@ -31,7 +32,7 @@ class Heartbeats(unittest.TestCase):
         return [(p, k, b) for p, k, b in self.server.seen if p.endswith("/heartbeat")]
 
     def test_a_running_agent_beats_with_its_plan_and_task_until_it_exits(self):
-        """S4-3: beats arrive while the agent runs, and stop once it has exited."""
+        """S4-3: beats arrive while the agent runs, and stop once it has exited (one in flight)."""
         with mock.patch.object(run_agent, "HEARTBEAT_S", 0.1):
             out = run_agent._run(
                 sleeping(0.7), self.tmp, {}, 30, self.tmp / "a.jsonl", self.mirror, "a"
@@ -40,21 +41,11 @@ class Heartbeats(unittest.TestCase):
             threading.Event().wait(0.3)
         self.assertEqual(out["code"], 0)
         self.assertGreaterEqual(after_exit, 3)
-        self.assertEqual(len(self.beats()), after_exit)
+        self.assertLessEqual(len(self.beats()), after_exit + 1)
         self.assertEqual(
             set((p, k, b["plan"], b["task"]) for p, k, b in self.beats()),
             {("/api/dispatch/heartbeat", "k1", "p1", "a")},
         )
-
-    def test_beats_stop_once_the_time_cap_passes(self):
-        """A run still going past its cap is stuck: silence lets Sazed's reaper end it."""
-        stop = threading.Event()
-        with mock.patch.object(run_agent, "HEARTBEAT_S", 0.05):
-            beater = threading.Thread(target=run_agent._beat, args=(self.mirror, "a", stop, 0))
-            beater.start()
-            beater.join(timeout=2)
-        self.assertFalse(beater.is_alive())
-        self.assertEqual(self.beats(), [])
 
     def test_an_unreachable_sazed_never_fails_the_task(self):
         """S4-8: every beat fails, the run still ends normally and nothing raises."""
@@ -70,6 +61,17 @@ class Heartbeats(unittest.TestCase):
         self.mirror.failed = True
         self.mirror.heartbeat("a")
         self.assertEqual(len(self.beats()), 1)
+
+    def test_a_settled_row_still_goes_out_after_a_row_post_failed(self):
+        """After a blip the beats keep coming, so the final row must too, or the reaper would
+        fail a task that finished. Running rows still wait for a sync."""
+        self.mirror.failed = True
+        board = Board(self.tmp / "home", self.mirror)
+        board.write("a", "running", "go")
+        board.write("a", "done", "ok")
+        rows = [b for p, _, b in self.server.seen if p.endswith("/dispatch/rows")]
+        self.assertEqual([(r["task"], r["state"]) for r in rows], [("a", "done")])
+        self.assertTrue(self.mirror.failed)
 
 
 if __name__ == "__main__":

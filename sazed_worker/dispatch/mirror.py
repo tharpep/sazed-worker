@@ -44,20 +44,24 @@ class Mirror:
         )
         urllib.request.urlopen(req, timeout=TIMEOUT_S).close()
 
-    def _post(self, path: str, body: dict[str, Any]) -> None:
-        if self.failed:
+    def _post(self, path: str, body: dict[str, Any], always: bool = False) -> None:
+        if self.failed and not always:
             return
         try:
             self._send(path, body)
         except Exception as e:
+            if not self.failed:
+                print(
+                    f"dispatch: mirror to {self.base} failed, run sync later: {e}",
+                    file=sys.stderr,
+                )
             self.failed = True
-            print(
-                f"dispatch: mirror to {self.base} failed, run sync later: {e}",
-                file=sys.stderr,
-            )
 
     def row(self, row: dict[str, Any]) -> None:
-        self._post("/dispatch/rows", {"plan": self.plan_id, **row})
+        # A settled row is tried even after a failure: the task's beats reach Sazed regardless,
+        # so a missing final row would let the reaper fail a task that finished.
+        settled = row["state"] != "running"
+        self._post("/dispatch/rows", {"plan": self.plan_id, **row}, always=settled)
 
     def heartbeat(self, task: str) -> None:
         """Never raises, and ignores the failed flag: one blip must not stop the beats and get a
