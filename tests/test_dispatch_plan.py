@@ -178,6 +178,16 @@ class Cli(unittest.TestCase):
         self.assertIn("no done", out)
         self.assertIn("no check", out)
 
+    def test_board_runs_with_neither_sazed_nor_a_cache(self):
+        tmp = Path(tempfile.mkdtemp())
+        (tmp / "plan.json").write_text(json.dumps({"id": "p", "tasks": [{"id": "a", "goal": "g"}]}))
+        out = io.StringIO()
+        env = {"DISPATCH_HOME": str(tmp / "home"), "DISPATCH_SAZED_URL": ""}
+        with redirect_stdout(out), mock.patch.dict("os.environ", env):
+            code = main(["board", str(tmp / "plan.json"), "--repo", str(tmp)])
+        self.assertEqual(code, 0)
+        self.assertIn("not started", out.getvalue())
+
     def test_a_workstream_config_supplies_the_check(self):
         code, _ = self._run(
             {"id": "p", "tasks": [{"id": "a", "goal": "g", "done": "d", "owns": ["x"]}]},

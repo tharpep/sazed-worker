@@ -15,7 +15,7 @@ from sazed_worker.dispatch import integrate, profiles
 from sazed_worker.dispatch.__main__ import main
 from sazed_worker.dispatch.board import Board
 from sazed_worker.dispatch.mirror import Mirror
-from sazed_worker.dispatch.plan import Plan, Task, load, resolve, validate
+from sazed_worker.dispatch.plan import Plan, PlanError, Task, load, resolve, validate
 from sazed_worker.dispatch.run_agent import agent_command, run_task
 from sazed_worker.dispatch.workspace import Workspace, git
 from tests import registry
@@ -188,13 +188,70 @@ class Sources(Env):
         os.environ["DISPATCH_SAZED_URL"] = self.serve(Registry, profiles=[CHANGE_JOB, RESEARCH_JOB])
         profiles.load()
         change = resolve(_task("change"), {})
-        self.assertEqual((change["effort"], change["budget_usd"]), (None, None))
+        self.assertEqual((change.get("effort"), change.get("budget_usd")), (None, None))
         self.assertEqual((change["max_tool_calls"], change["capability"]), (200, "change"))
         cmd = agent_command(change, Path("/tmp/s.json"), read_only=False)
         self.assertNotIn("--effort", cmd)
         self.assertNotIn("--max-budget-usd", cmd)
         agy = agent_command(resolve(_task("research_quick"), {}), Path("/tmp/s.json"), True)
         self.assertFalse(any(a.startswith("--effort") for a in agy))
+
+    def test_workstream_defaults_fill_a_null_effort_and_budget(self):
+        os.environ["DISPATCH_SAZED_URL"] = self.serve(Registry, profiles=[CHANGE_JOB])
+        profiles.load()
+        got = resolve(_task("change"), {"defaults": {"budget_usd": 1.0, "effort": "low"}})
+        self.assertEqual((got["budget_usd"], got["effort"]), (1.0, "low"))
+        cmd = agent_command(got, Path("/tmp/s.json"), read_only=False)
+        self.assertEqual(cmd[cmd.index("--max-budget-usd") + 1], "1.0")
+
+    def test_capability_wins_when_it_disagrees_with_read_only(self):
+        """Proves read_only is derived from capability, not copied from the row."""
+        rows = [CHANGE_JOB | {"read_only": True}, RESEARCH_JOB | {"read_only": False}]
+        os.environ["DISPATCH_SAZED_URL"] = self.serve(Registry, profiles=rows)
+        profiles.load()
+        self.assertFalse(resolve(_task("change"), {})["read_only"])
+        self.assertTrue(resolve(_task("research_quick"), {})["read_only"])
+
+    def test_an_empty_answer_from_sazed_keeps_the_cache(self):
+        """Proves a 200 with [] counts as a failed fetch: the cache is used and not overwritten."""
+        cached = [_row("verify", model="opus")]
+        registry.write_cache(profiles.cache_path().parent, cached)
+        os.environ["DISPATCH_SAZED_URL"] = self.serve(Registry, profiles=[])
+        with contextlib.redirect_stderr(io.StringIO()):
+            table, source = profiles.load()
+        self.assertEqual((source, set(table)), ("cache", {"verify"}))
+        self.assertEqual(json.loads(profiles.cache_path().read_text()), cached)
+
+    def test_an_empty_or_malformed_cache_is_refused(self):
+        for body in ("[]", "{}", "not json"):
+            with self.subTest(body=body):
+                profiles.cache_path().parent.mkdir(parents=True, exist_ok=True)
+                profiles.cache_path().write_text(body)
+                with self.assertRaisesRegex(profiles.ProfilesError, "unreadable"):
+                    profiles.load()
+
+    def test_an_unknown_profile_from_the_cache_names_the_cache(self):
+        registry.write_cache(profiles.cache_path().parent, [_row("verify")])
+        profiles.load()
+        with self.assertRaisesRegex(PlanError, "unknown profile 'flash'.*from the cache at .*ago"):
+            resolve(_task("flash"), {})
+
+    def test_capability_in_a_workstream_profile_is_refused(self):
+        os.environ["DISPATCH_SAZED_URL"] = self.serve(Registry, profiles=registry.ROWS)
+        profiles.load()
+        config = {"profiles": {"implement": {"capability": "review"}}}
+        with self.assertRaisesRegex(PlanError, "use read_only in a workstream profile"):
+            resolve(_task("implement"), config)
+
+    def test_a_workstream_profile_named_like_a_registry_row_inherits_from_it(self):
+        """Proves a TOML [profiles.review] overrides only the keys it sets; the registry's
+        review row fills the rest."""
+        review = CHANGE_JOB | {"name": "review", "capability": "review", "read_only": True}
+        os.environ["DISPATCH_SAZED_URL"] = self.serve(Registry, profiles=[review])
+        profiles.load()
+        got = resolve(_task("review"), {"profiles": {"review": {"model": "haiku"}}})
+        self.assertEqual((got["model"], got["timeout_s"]), ("haiku", 1800))
+        self.assertEqual((got["read_only"], got["max_tool_calls"]), (True, 200))
 
     def test_a_plan_may_use_any_profile_with_a_model_and_timeout(self):
         no_timeout = CHANGE_JOB | {"name": "broken", "timeout_s": None}

@@ -30,9 +30,13 @@ def _profiles(args: argparse.Namespace) -> int:
     return 0
 
 
-def _load(args: argparse.Namespace) -> tuple[plans.Plan, dict]:
-    profiles.load()
-    mcp.load()
+NO_PROFILES = ("board", "clean")
+
+
+def _load(args: argparse.Namespace, resolves: bool = True) -> tuple[plans.Plan, dict]:
+    if resolves:
+        profiles.load()
+        mcp.load()
     loaded = plans.load(Path(args.plan))
     config = plans.load_config(Path(args.config) if args.config else None)
     return loaded, config
@@ -62,8 +66,9 @@ def _validate(args: argparse.Namespace) -> int:
 
 
 def _context(args: argparse.Namespace):
-    loaded, config = _load(args)
-    problems = plans.validate(loaded, config)
+    resolves = args.command not in NO_PROFILES
+    loaded, config = _load(args, resolves)
+    problems = plans.validate(loaded, config) if resolves else []
     if problems:
         raise plans.PlanError("the plan doesn't validate:\n" + "\n".join(problems))
     home = default_home(loaded.id)

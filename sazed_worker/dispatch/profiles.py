@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -36,9 +37,12 @@ def _fetch(base: str, key: str | None) -> list[dict[str, Any]]:
     headers = SHAPE_V2 | ({"X-API-Key": key} if key else {})
     req = urllib.request.Request(f"{base.rstrip('/')}/agents/profiles", headers=headers)
     with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
-        rows = json.load(resp)
-    if not isinstance(rows, list):
-        raise ValueError("profiles are not a list")
+        return _rows(json.load(resp))
+
+
+def _rows(rows: Any) -> list[dict[str, Any]]:
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("profiles are not a non-empty list")
     return rows
 
 
@@ -76,7 +80,7 @@ def load() -> tuple[dict[str, dict[str, Any]], str]:
             "Run once with Sazed reachable to write the cache."
         )
     try:
-        _active = (_table(json.loads(path.read_text())), "cache")
+        _active = (_table(_rows(json.loads(path.read_text()))), "cache")
     except (OSError, ValueError, KeyError, TypeError) as e:
         raise ProfilesError(f"no agent profiles: the cache at {path} is unreadable: {e}") from e
     return _active
@@ -84,3 +88,15 @@ def load() -> tuple[dict[str, dict[str, Any]], str]:
 
 def current() -> tuple[dict[str, dict[str, Any]], str]:
     return _active
+
+
+def cache_note(source: str) -> str:
+    """Where cached profiles came from and how old they are; empty for any other source."""
+    if source != "cache":
+        return ""
+    path = cache_path()
+    try:
+        hours = (time.time() - path.stat().st_mtime) / 3600
+    except OSError:
+        return f" (profiles from the cache at {path})"
+    return f" (profiles from the cache at {path}, written {hours:.1f} h ago)"
