@@ -16,6 +16,7 @@ from sazed_worker.dispatch.board import Board
 from sazed_worker.dispatch.mirror import Mirror
 from sazed_worker.dispatch.plan import Plan, Task
 from sazed_worker.dispatch.workspace import Workspace, git
+from tests import registry
 
 
 class Recorder(BaseHTTPRequestHandler):
@@ -58,6 +59,8 @@ class Mirroring(unittest.TestCase):
                 ),
             ],
         )
+        registry.install()
+        registry.write_cache(self.tmp / "home")
         self.home = self.tmp / "home" / "m1"
         self.ws = Workspace(self.repo, "m1", self.home)
         self.saved = {

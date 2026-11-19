@@ -117,12 +117,13 @@ def agent_command(
     mcp_args: list[str] | None = None,
     prompt: str | None = None,
 ) -> list[str]:
+    effort, budget = cfg.get("effort"), cfg.get("budget_usd")
     if cfg.get("engine") == "agy":
         cmd = [
             *_agy(),
             "--output-format=stream-json",
             f"--model={cfg['model']}",
-            f"--effort={cfg['effort']}",
+            *([f"--effort={effort}"] if effort else []),
             "--dangerously-skip-permissions",
             "--disable-slash-commands",
             "--json-schema",
@@ -139,8 +140,7 @@ def agent_command(
         "--verbose",
         "--model",
         str(cfg["model"]),
-        "--effort",
-        str(cfg["effort"]),
+        *(["--effort", str(effort)] if effort else []),
         "--settings",
         str(settings_path),
         "--setting-sources",
@@ -148,8 +148,7 @@ def agent_command(
         "--strict-mcp-config",
         "--permission-mode",
         "acceptEdits",
-        "--max-budget-usd",
-        str(cfg["budget_usd"]),
+        *(["--max-budget-usd", str(budget)] if budget is not None else []),
         "--json-schema",
         json.dumps(STATE_SCHEMA),
     ]
@@ -190,7 +189,7 @@ def run_task(
     board.write(
         task.id,
         "running",
-        f"{cfg['model']} / {cfg['effort']}{granted.note}",
+        f"{cfg['model']} / {cfg.get('effort') or '-'}{granted.note}",
         worktree=str(worktree),
         profile=cfg["profile"],
     )
