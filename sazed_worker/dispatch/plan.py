@@ -6,12 +6,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from sazed_worker.dispatch.profiles import BUILTIN, current
+from sazed_worker.dispatch.profiles import current
 from sazed_worker.dispatch.rules import glob_match
 
-DEFAULTS: dict[str, Any] = {**BUILTIN["implement"], "read_only": False, "evidence_required": False}
-
-REQUIRED = ("model", "effort", "budget_usd", "timeout_s")
+DEFAULT_PROFILE = "implement"
+DEFAULTS: dict[str, Any] = {"read_only": False, "evidence_required": False}
+RESOURCES = ("model", "effort", "budget_usd", "timeout_s")
+REQUIRED = ("model", "timeout_s")
 _WILD = set("*?[")
 
 
@@ -27,7 +28,7 @@ class Task:
     owns: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)
     check: str | None = None
-    profile: str = "implement"
+    profile: str = DEFAULT_PROFILE
     overrides: dict[str, Any] = field(default_factory=dict)
 
 
@@ -79,7 +80,9 @@ def resolve(task: Task, config: dict[str, Any]) -> dict[str, Any]:
     profiles = registry | config.get("profiles", {})
     if task.profile not in profiles:
         raise PlanError(f"task {task.id}: unknown profile {task.profile!r}")
-    merged = DEFAULTS | config.get("defaults", {}) | registry.get(task.profile, {})
+    fallback = registry.get(DEFAULT_PROFILE, {})
+    merged = DEFAULTS | {k: fallback[k] for k in RESOURCES if k in fallback}
+    merged |= config.get("defaults", {}) | registry.get(task.profile, {})
     merged |= config.get("profiles", {}).get(task.profile, {}) | task.overrides
     missing = [k for k in REQUIRED if merged.get(k) in (None, "")]
     if missing:

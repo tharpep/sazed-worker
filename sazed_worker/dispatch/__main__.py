@@ -14,7 +14,11 @@ from sazed_worker.dispatch.workspace import GitError, Workspace, default_home
 
 
 def _profiles(args: argparse.Namespace) -> int:
-    table, source = profiles.load()
+    try:
+        table, source = profiles.load()
+    except profiles.ProfilesError as e:
+        print(f"refused: {e}")
+        return 1
     servers, mcp_source = mcp.load()
     out = {
         "source": source,
@@ -37,6 +41,9 @@ def _load(args: argparse.Namespace) -> tuple[plans.Plan, dict]:
 def _validate(args: argparse.Namespace) -> int:
     try:
         loaded, config = _load(args)
+    except profiles.ProfilesError as e:
+        print(f"refused: {e}")
+        return 1
     except (OSError, ValueError, KeyError) as e:
         print(f"can't read the plan: {e}")
         return 2
@@ -118,7 +125,13 @@ def _act(args: argparse.Namespace) -> int:
                     board.mirror.row(row)
         elif args.command == "clean":
             integrate.clean(plan, ws, board)
-    except (plans.PlanError, integrate.IntegrateError, GitError, OSError) as e:
+    except (
+        plans.PlanError,
+        profiles.ProfilesError,
+        integrate.IntegrateError,
+        GitError,
+        OSError,
+    ) as e:
         print(f"refused: {e}")
         return 1
     return 0

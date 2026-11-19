@@ -1,4 +1,4 @@
-"""Dispatch reads agent profiles from Sazed, then a cache, then built-ins, and checks evidence."""
+"""Dispatch reads agent profiles from Sazed, then its cache, else refuses, and checks evidence."""
 
 import contextlib
 import io
@@ -15,27 +15,52 @@ from sazed_worker.dispatch import integrate, profiles
 from sazed_worker.dispatch.__main__ import main
 from sazed_worker.dispatch.board import Board
 from sazed_worker.dispatch.mirror import Mirror
-from sazed_worker.dispatch.plan import Plan, Task, load, resolve
-from sazed_worker.dispatch.run_agent import run_task
+from sazed_worker.dispatch.plan import Plan, Task, load, resolve, validate
+from sazed_worker.dispatch.run_agent import agent_command, run_task
 from sazed_worker.dispatch.workspace import Workspace, git
+from tests import registry
 from tests.test_dispatch_mirror import Recorder
 
 FAKE = Path(__file__).resolve().parents[1] / "sazed_worker" / "dispatch" / "fake_agent.py"
 
-KEYS = ("model", "effort", "budget_usd", "timeout_s", "read_only", "evidence_required")
+KEYS = ("model", "effort", "budget_usd", "timeout_s", "read_only", "evidence_required", "engine")
 TABLE = {
-    "smoke": ("haiku", "medium", 0.5, 600, True, False),
-    "sweep": ("haiku", "max", 0.5, 600, True, False),
-    "verify": ("haiku", "max", 0.5, 600, True, True),
-    "implement": ("sonnet", "high", 2.0, 1200, False, False),
-    "design": ("opus", "xhigh", 4.0, 1200, False, False),
-    "flash": ("gemini-3.8-flash-high", "high", 0.5, 1200, False, False),
+    "smoke": ("haiku", "medium", 0.5, 600, True, False, "claude"),
+    "sweep": ("haiku", "max", 0.5, 600, True, False, "claude"),
+    "verify": ("haiku", "max", 0.5, 600, True, True, "claude"),
+    "implement": ("sonnet", "high", 2.0, 1200, False, False, "claude"),
+    "design": ("opus", "xhigh", 4.0, 1200, False, False, "claude"),
+    "flash": ("gemini-3.8-flash-high", "high", 0.5, 1200, False, False, "agy"),
+}
+
+CHANGE_JOB = {
+    "name": "change",
+    "engine": "claude",
+    "capability": "change",
+    "model": "claude-sonnet-5-5",
+    "effort": None,
+    "budget_usd": None,
+    "timeout_s": 1800,
+    "max_tool_calls": 200,
+    "evidence_required": False,
+    "mcp": {},
+    "read_only": False,
+}
+RESEARCH_JOB = CHANGE_JOB | {
+    "name": "research_quick",
+    "engine": "agy",
+    "capability": "research",
+    "model": "gemini-3.8-flash-high",
+    "timeout_s": 300,
+    "max_tool_calls": 30,
+    "read_only": True,
 }
 
 
 class Registry(BaseHTTPRequestHandler):
     def do_GET(self):
         self.server.seen.append((self.path, self.headers.get("X-API-Key")))
+        self.server.shape = self.headers.get("X-Sazed-Shape")
         body = json.dumps(self.server.profiles).encode()
         self.send_response(200)
         self.send_header("Content-Length", str(len(body)))
@@ -47,6 +72,7 @@ class Registry(BaseHTTPRequestHandler):
 
 
 def _row(name: str, **fields) -> dict:
+    """A row in the shape Sazed served before migration 035: read_only, no capability."""
     return {
         "name": name,
         "model": "haiku",
@@ -62,6 +88,10 @@ def _row(name: str, **fields) -> dict:
     } | fields
 
 
+def _task(profile: str, **kw) -> Task:
+    return Task(id="t", goal="g", done="d", profile=profile, **kw)
+
+
 class Env(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="dispatch-profiles-"))
@@ -69,7 +99,8 @@ class Env(unittest.TestCase):
         saved = {k: os.environ.pop(k, None) for k in (*names, "DISPATCH_FAKE_MODES")}
         os.environ["DISPATCH_HOME"] = str(self.tmp / "home")
         self.addCleanup(self.restore, saved)
-        self.addCleanup(setattr, profiles, "_active", (profiles.BUILTIN, "builtin"))
+        self.addCleanup(setattr, profiles, "_active", profiles.current())
+        registry.install()
 
     def restore(self, saved):
         for k, v in saved.items():
@@ -97,49 +128,105 @@ class Sources(Env):
         table, source = profiles.load()
         self.assertEqual(source, "sazed")
         self.assertEqual(self.server.seen, [("/agents/profiles", "k1")])
-        got = resolve(Task(id="v", goal="g", done="d", profile="verify"), {})
+        self.assertEqual(self.server.shape, "2")
+        got = resolve(_task("verify"), {})
         self.assertEqual((got["model"], got["effort"]), ("sonnet", "xhigh"))
         self.assertEqual(got["profile_source"], "sazed")
         self.assertEqual(json.loads(profiles.cache_path().read_text()), rows)
-        self.assertEqual(table["sweep"], profiles.BUILTIN["sweep"])
+        self.assertEqual(set(table), {"verify"})
 
     def test_the_cache_is_used_when_sazed_is_down(self):
-        profiles.cache_path().parent.mkdir(parents=True)
-        profiles.cache_path().write_text(json.dumps([_row("verify", model="opus")]))
+        registry.write_cache(profiles.cache_path().parent, [_row("verify", model="opus")])
         os.environ["DISPATCH_SAZED_URL"] = "http://127.0.0.1:1"
         with contextlib.redirect_stderr(io.StringIO()):
             _, source = profiles.load()
-        got = resolve(Task(id="v", goal="g", done="d", profile="verify"), {})
+        got = resolve(_task("verify"), {})
         self.assertEqual((source, got["model"], got["profile_source"]), ("cache", "opus", "cache"))
 
-    def test_built_ins_are_used_with_neither_and_match_the_table(self):
-        _, source = profiles.load()
-        self.assertEqual(source, "builtin")
+    def test_with_neither_sazed_nor_a_cache_dispatch_refuses(self):
+        """Proves no built-in table stands in: with no Sazed and no cache, load raises and the
+        command prints a refusal naming the cache path."""
+        with self.assertRaises(profiles.ProfilesError):
+            profiles.load()
+        os.environ["DISPATCH_SAZED_URL"] = "http://127.0.0.1:1"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main(["profiles"]), 1)
+        self.assertIn("refused: no agent profiles", out.getvalue())
+        self.assertIn(str(profiles.cache_path()), out.getvalue())
+
+    def test_the_dispatch_profiles_resolve_as_before_from_the_new_shape(self):
+        """Proves the six dispatch profiles, served with capability and engine, resolve to the
+        values and read_only the deleted built-in table held."""
+        os.environ["DISPATCH_SAZED_URL"] = self.serve(Registry, profiles=registry.ROWS)
+        profiles.load()
         for name, want in TABLE.items():
             with self.subTest(name=name):
-                got = resolve(Task(id="t", goal="g", done="d", profile=name), {})
+                got = resolve(_task(name), {})
                 self.assertEqual(tuple(got[k] for k in KEYS), want)
-                self.assertEqual(got["profile_source"], "builtin")
+
+    def test_rows_without_capability_or_engine_follow_read_only_and_run_on_claude(self):
+        """Proves a cache written before migration 035 still resolves: read_only comes from the
+        row and the engine defaults to claude."""
+        rows = [_row("verify", read_only=True), _row("implement", read_only=False)]
+        registry.write_cache(profiles.cache_path().parent, rows)
+        _, source = profiles.load()
+        self.assertEqual(source, "cache")
+        verify, implement = resolve(_task("verify"), {}), resolve(_task("implement"), {})
+        self.assertEqual((verify["read_only"], verify["engine"]), (True, "claude"))
+        self.assertEqual((implement["read_only"], implement["engine"]), (False, "claude"))
+
+    def test_capability_decides_read_only_when_present(self):
+        os.environ["DISPATCH_SAZED_URL"] = self.serve(Registry, profiles=[CHANGE_JOB, RESEARCH_JOB])
+        profiles.load()
+        self.assertFalse(resolve(_task("change"), {})["read_only"])
+        self.assertTrue(resolve(_task("research_quick"), {})["read_only"])
+
+    def test_a_job_profile_with_no_effort_or_budget_runs_uncapped(self):
+        """Proves a NULL effort drops the effort flag and a NULL budget drops the budget cap,
+        and that max_tool_calls is read from the row."""
+        os.environ["DISPATCH_SAZED_URL"] = self.serve(Registry, profiles=[CHANGE_JOB, RESEARCH_JOB])
+        profiles.load()
+        change = resolve(_task("change"), {})
+        self.assertEqual((change["effort"], change["budget_usd"]), (None, None))
+        self.assertEqual((change["max_tool_calls"], change["capability"]), (200, "change"))
+        cmd = agent_command(change, Path("/tmp/s.json"), read_only=False)
+        self.assertNotIn("--effort", cmd)
+        self.assertNotIn("--max-budget-usd", cmd)
+        agy = agent_command(resolve(_task("research_quick"), {}), Path("/tmp/s.json"), True)
+        self.assertFalse(any(a.startswith("--effort") for a in agy))
+
+    def test_a_plan_may_use_any_profile_with_a_model_and_timeout(self):
+        no_timeout = CHANGE_JOB | {"name": "broken", "timeout_s": None}
+        rows = [CHANGE_JOB, no_timeout]
+        os.environ["DISPATCH_SAZED_URL"] = self.serve(Registry, profiles=rows)
+        profiles.load()
+        task = Task(id="c", goal="g", done="d", profile="change", owns=["x"], check="true")
+        self.assertEqual(validate(Plan(id="p", tasks=[task])), [])
+        broken = Task(id="b", goal="g", done="d", profile="broken", owns=["x"], check="true")
+        self.assertIn("task b: no timeout_s", validate(Plan(id="p", tasks=[broken])))
 
     def test_a_task_override_still_beats_the_profile(self):
         os.environ["DISPATCH_SAZED_URL"] = self.serve(Registry, profiles=[_row("verify")])
         profiles.load()
-        overrides = {"effort": "max", "model": "opus"}
-        task = Task(id="v", goal="g", done="d", profile="verify", overrides=overrides)
+        task = _task("verify", overrides={"effort": "max", "model": "opus"})
         got = resolve(task, {"profiles": {"verify": {"effort": "high"}}})
         self.assertEqual((got["effort"], got["model"]), ("max", "opus"))
 
     def test_the_profiles_command_lists_them_with_their_source(self):
+        os.environ["DISPATCH_SAZED_URL"] = self.serve(Registry, profiles=registry.ROWS)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(main(["profiles"]), 0)
         data = json.loads(out.getvalue())
-        self.assertEqual(data["source"], "builtin")
+        self.assertEqual(data["source"], "sazed")
         self.assertEqual(set(data["profiles"]), set(TABLE))
 
-    def test_flash_profile_resolves_with_agy_engine(self):
-        """Proves the flash profile specifies the agy execution engine and model."""
-        got = resolve(Task(id="f", goal="g", done="d", profile="flash"), {})
+    def test_flash_comes_from_the_registry_with_the_agy_engine(self):
+        """Proves the flash profile's agy engine and model come from Sazed's row."""
+        os.environ["DISPATCH_SAZED_URL"] = self.serve(Registry, profiles=registry.ROWS)
+        profiles.load()
+        got = resolve(_task("flash"), {})
         self.assertEqual(got["engine"], "agy")
         self.assertEqual(got["model"], "gemini-3.8-flash-high")
 

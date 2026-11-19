@@ -6,10 +6,16 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 from sazed_worker.dispatch import plan as plans
 from sazed_worker.dispatch.__main__ import main
 from sazed_worker.dispatch.plan import Plan, Task, could_overlap, resolve, validate
+from tests import registry
+
+
+def setUpModule():
+    registry.install()
 
 
 def _task(tid, owns=("src/x/**",), deps=(), **kw):
@@ -132,6 +138,11 @@ class Resolve(unittest.TestCase):
         with self.assertRaises(plans.PlanError):
             resolve(_task("a"), {"profiles": {"implement": {"model": ""}}})
 
+    def test_no_effort_or_budget_is_allowed(self):
+        config = {"profiles": {"implement": {"effort": None, "budget_usd": None}}}
+        got = resolve(_task("a"), config)
+        self.assertEqual((got["effort"], got["budget_usd"], got["timeout_s"]), (None, None, 1200))
+
 
 class Cli(unittest.TestCase):
     def _run(self, data, config=None):
@@ -141,8 +152,10 @@ class Cli(unittest.TestCase):
         if config:
             (tmp / "ws.toml").write_text(config)
             argv += ["--config", str(tmp / "ws.toml")]
+        registry.write_cache(tmp / "home")
         out = io.StringIO()
-        with redirect_stdout(out):
+        env = {"DISPATCH_HOME": str(tmp / "home"), "DISPATCH_SAZED_URL": ""}
+        with redirect_stdout(out), mock.patch.dict("os.environ", env):
             code = main(argv)
         return code, out.getvalue()
 

@@ -15,6 +15,7 @@ from sazed_worker.dispatch.board import Board
 from sazed_worker.dispatch.plan import Plan, Task
 from sazed_worker.dispatch.run_agent import run_task
 from sazed_worker.dispatch.workspace import Workspace, git
+from tests import registry
 
 FAKE = Path(__file__).resolve().parents[1] / "sazed_worker" / "dispatch" / "fake_agent.py"
 CHECK = "sh check.sh"
@@ -63,6 +64,8 @@ class Engine(unittest.TestCase):
         }
         self._old = {k: os.environ.get(k) for k in self.env}
         os.environ.update(self.env)
+        registry.install()
+        registry.write_cache(self.tmp / "home")
         self.home = self.tmp / "home" / "p1"
         self.ws = Workspace(self.repo, "p1", self.home)
         self.board = Board(self.home)
