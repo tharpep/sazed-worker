@@ -6,13 +6,12 @@ import json
 import os
 import stat
 import unittest
-from pathlib import Path
 
 from sazed_worker.dispatch import mcp
-from sazed_worker.dispatch.run_agent import agent_command
+from tests.test_dispatch_command import command
 from tests.test_dispatch_profiles import Env, Registry
 
-CFG = {"model": "haiku", "effort": "max", "budget_usd": 0.5}
+CFG = {"model": "haiku", "effort": "max", "budget_usd": 0.5, "timeout_s": 600}
 CONTEXT7 = {"name": "context7", "transport": "http", "url": "https://c7.test/mcp", "headers": {}}
 SEARCH = {
     "name": "web-search",
@@ -35,7 +34,7 @@ class Grants(Env):
 
     def test_no_grants_means_no_mcp_config(self):
         grant = mcp.build({}, self.run_dir)
-        cmd = agent_command(CFG, Path("/tmp/s.json"), False, grant.args)
+        cmd = command(CFG, False, grant)
         self.assertNotIn("--mcp-config", cmd)
         self.assertNotIn("--allowedTools", cmd)
         self.assertIn("--strict-mcp-config", cmd)
@@ -44,7 +43,7 @@ class Grants(Env):
 
     def test_a_tool_grant_becomes_exact_allowed_tools(self):
         grant = mcp.build({"context7": ["resolve-library-id", "query-docs"]}, self.run_dir)
-        cmd = agent_command(CFG, Path("/tmp/s.json"), False, grant.args)
+        cmd = command(CFG, False, grant)
         self.assertEqual(cmd[cmd.index("--mcp-config") + 1], str(self.run_dir / "mcp.json"))
         self.assertEqual(
             cmd[cmd.index("--allowedTools") + 1],
@@ -55,7 +54,7 @@ class Grants(Env):
 
     def test_a_star_grant_becomes_the_server_rule(self):
         grant = mcp.build({"context7": ["*"], "local": ["*"]}, self.run_dir)
-        self.assertEqual(grant.args[-1], "mcp__context7,mcp__local")
+        self.assertEqual(grant.allowed, ["mcp__context7", "mcp__local"])
         self.assertEqual(self.config()["local"], {"command": "npx", "args": ["-y", "srv"]})
 
     def test_an_http_server_gets_its_headers_resolved_from_the_environment(self):
@@ -72,12 +71,12 @@ class Grants(Env):
     def test_a_missing_variable_skips_the_server_and_says_so(self):
         grant = mcp.build({"context7": ["*"], "web-search": ["*"]}, self.run_dir, {})
         self.assertEqual(list(self.config()), ["context7"])
-        self.assertEqual(grant.args[-1], "mcp__context7")
+        self.assertEqual(grant.allowed, ["mcp__context7"])
         self.assertEqual(grant.note, " · mcp: context7 (web-search skipped: WEB_SEARCH_KEY unset)")
 
     def test_only_skipped_servers_leave_no_config_and_keep_the_note(self):
         grant = mcp.build({"web-search": ["*"]}, self.run_dir, {})
-        self.assertEqual(grant.args, [])
+        self.assertEqual((grant.config, grant.allowed), (None, []))
         self.assertIn("web-search skipped: WEB_SEARCH_KEY unset", grant.note)
         self.assertFalse((self.run_dir / "mcp.json").exists())
 

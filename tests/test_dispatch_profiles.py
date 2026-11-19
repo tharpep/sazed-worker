@@ -16,9 +16,10 @@ from sazed_worker.dispatch.__main__ import main
 from sazed_worker.dispatch.board import Board
 from sazed_worker.dispatch.mirror import Mirror
 from sazed_worker.dispatch.plan import Plan, PlanError, Task, load, resolve, validate
-from sazed_worker.dispatch.run_agent import agent_command, run_task
+from sazed_worker.dispatch.run_agent import run_task
 from sazed_worker.dispatch.workspace import Workspace, git
 from tests import registry
+from tests.test_dispatch_command import command
 from tests.test_dispatch_mirror import Recorder
 
 FAKE = Path(__file__).resolve().parents[1] / "sazed_worker" / "dispatch" / "fake_agent.py"
@@ -190,10 +191,10 @@ class Sources(Env):
         change = resolve(_task("change"), {})
         self.assertEqual((change.get("effort"), change.get("budget_usd")), (None, None))
         self.assertEqual((change["max_tool_calls"], change["capability"]), (200, "change"))
-        cmd = agent_command(change, Path("/tmp/s.json"), read_only=False)
+        cmd = command(change, read_only=False)
         self.assertNotIn("--effort", cmd)
         self.assertNotIn("--max-budget-usd", cmd)
-        agy = agent_command(resolve(_task("research_quick"), {}), Path("/tmp/s.json"), True)
+        agy = command(resolve(_task("research_quick"), {}), True)
         self.assertFalse(any(a.startswith("--effort") for a in agy))
 
     def test_workstream_defaults_fill_a_null_effort_and_budget(self):
@@ -201,7 +202,7 @@ class Sources(Env):
         profiles.load()
         got = resolve(_task("change"), {"defaults": {"budget_usd": 1.0, "effort": "low"}})
         self.assertEqual((got["budget_usd"], got["effort"]), (1.0, "low"))
-        cmd = agent_command(got, Path("/tmp/s.json"), read_only=False)
+        cmd = command(got, read_only=False)
         self.assertEqual(cmd[cmd.index("--max-budget-usd") + 1], "1.0")
 
     def test_capability_wins_when_it_disagrees_with_read_only(self):

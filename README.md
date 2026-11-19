@@ -19,8 +19,8 @@ It runs one job at a time and uses only the Python standard library.
 | `config` | environment, the agent user's paths, limits, the logger, the stop flag |
 | `scrub`, `sazed_api` | secret scrubbing, and the three Sazed worker routes |
 | `agent_process` | running children as the agent user, killing their process groups, `JobFailed` |
-| `agy`, `claude` | each CLI's command line (and Claude's profiles) and how its event stream is read |
-| `run` | one agent process, streamed to Sazed under the timeout and tool-call cap |
+| `agy`, `claude`, `contract` | each CLI's command line from a run spec (and Claude's profiles) and how its event stream is read; the spec, normalized events, stop reasons and result they share |
+| `job_spec`, `run` | a job's run spec; one agent process under the timeout and tool-call cap, its events streamed to Sazed (a job) or to a dispatch task's sink |
 | `repo`, `changes`, `checks`, `pr_checks` | workspaces and checkouts (and the repo's CLAUDE.md/REVIEW.md for the prompt), the changed-file list, the checks on a change job's edits, and the same checks on a PR before its review |
 | `report` | the shape check on a change job's closing JSON block, and its one repair prompt |
 | `jail`, `deps`, `tests` | bubblewrap jail for dependency installs, checks and tests; dependency setup; the repo's tests run by the worker |

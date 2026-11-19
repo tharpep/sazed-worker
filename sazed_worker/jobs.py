@@ -11,10 +11,11 @@ from .changes import changed_files
 from .check_result import check_result
 from .checks import Checks, checks_prompt
 from .config import JOBS_DIR, log
+from .job_spec import job_spec
 from .pr_checks import pr_checks, pr_diff
 from .repo import prepare_repo, repo_instructions, workspace
 from .report import repair_prompt, report_problem
-from .run import Run
+from .run import JobEvents, Run
 from .tests import TestRun
 
 # Stops that don't mean "give up": Sazed pauses a change job stopped this way (plans/10 P1.7),
@@ -50,7 +51,7 @@ def _review_checks(
 def run_job(job: dict[str, Any]) -> dict[str, Any]:
     """Run one job to completion and return the finish payload for Sazed."""
     ws = workspace(job["id"])
-    run = Run(job)
+    run = Run(JobEvents(job["id"]), f"job {job['id']}")
     changes: dict[str, str | None] = {}
     lint_meta: dict[str, Any] = {}
 
@@ -59,8 +60,7 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         target_dir = ws
         prompt = job["prompt"]
         if job.get("profile") == "review":
-            # Read-only rests on agy's print mode: it refuses write_file and run_command unless
-            # --dangerously-skip-permissions is passed, which agy.command never does (agy 1.4.12).
+            # Read-only rests on agy's print mode (pinned by test_worker_launch_pins).
             repo_dir, target_dir, resume = prepare_repo(job, ws)
             if job.get("resume_session_id") and not resume:
                 prompt = f"(The earlier session could not be resumed; start fresh.)\n\n{prompt}"
@@ -70,7 +70,7 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         elif resume and job.get("parent_id"):
             parent = JOBS_DIR / str(uuid.UUID(str(job["parent_id"])))
             target_dir = parent if parent.is_dir() else ws
-        code = run.run(agy.command(job, prompt, resume), target_dir)
+        code = run.run(job_spec(job, prompt, resume, target_dir))
         result = run.result or {}
         # agy ends with an empty answer when its last step was a tool headless mode refused.
         # Resume the same conversation once and ask it to answer with what it has.
@@ -79,7 +79,7 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
             log.info("job %s: empty answer after denied %s, resuming once", job["id"],
                      result.get("denied"))
             run.result = None
-            code = run.run(agy.command(job, _EMPTY_RETRY_PROMPT, run.session_id), target_dir)
+            code = run.run(job_spec(job, _EMPTY_RETRY_PROMPT, run.session_id, target_dir))
     elif job["agent"] == "claude":
         if job["profile"] not in claude.CAPABILITIES:
             return {"status": "failed", "error": f"profile '{job['profile']}' is not supported yet"}
@@ -90,7 +90,7 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         if not resume:
             section, lint_meta = _review_checks(job, run, repo_dir, ws)
             prompt = repo_instructions(repo_dir, claude.READS_CONTEXT) + section + prompt
-        code = run.run(claude.command(job, prompt, resume), cwd)
+        code = run.run(job_spec(job, prompt, resume, cwd))
         if job["profile"] == "change" and (run.result or {}).get("ok"):
             # The worker's checks and the repo's own tests (both run by the worker; the agent has
             # no shell) feed one fix round.
@@ -110,8 +110,8 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
                         )
                         first = run.result
                         run.result = None
-                        fix = claude.command(job, checks_prompt(issues + failures), run.session_id)
-                        code = run.run(fix, cwd)
+                        fix = checks_prompt(issues + failures)
+                        code = run.run(job_spec(job, fix, run.session_id, cwd))
                         if (run.result or {}).get("ok"):
                             changes = changed_files(repo_dir, cwd)
                         else:
@@ -132,7 +132,7 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
                          problem)
                 first = run.result
                 run.result = None
-                code = run.run(claude.command(job, repair_prompt(problem), run.session_id), cwd)
+                code = run.run(job_spec(job, repair_prompt(problem), run.session_id, cwd))
                 repaired = run.result or {}
                 if repaired.get("ok") and not report_problem(repaired.get("response") or ""):
                     changes = changed_files(repo_dir, cwd)  # in case it edited anyway
@@ -184,7 +184,7 @@ def run_job(job: dict[str, Any]) -> dict[str, Any]:
         return base | partial | {"status": "failed", "error": error}
     if run.stop_reason == "tool_cap":
         return base | partial | {"status": "failed",
-                                 "error": f"stopped at the {run.max_tools}-tool-call cap"}
+                                 "error": f"stopped at the {run.spec.max_tool_calls}-tool-call cap"}
     if result.get("ok") and response:
         out = base | {"status": "succeeded", "result": response}
         if job.get("profile") == "change":

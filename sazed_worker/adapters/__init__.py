@@ -3,10 +3,12 @@
 A third harness is one more module here. Each provides:
 - NAME, CAPABILITIES (the profiles it can run), RESUMES, TOOL_POLICY, READS_CONTEXT (rule files
   it loads from the checkout on its own, so the worker doesn't paste them into the prompt)
+- PERMISSION_MODES: the permission modes command() can actually set
 - available(): its CLI, and any login it needs, is on this machine
 - extra_env(): what its process needs beyond the base agent environment
-- command(job, prompt, resume): the argv for one run
-- handle_event(run, event): session id, tool count, plan limits, the normalized result
+- command(spec): the argv for one run of a contract.RunSpec, which each caller builds
+- handle_event(run, event): session id, plan limits, normalized ToolCall and PermissionDenied
+  events (run.emit), and the typed result (run.record_result)
 - trim_event(event): the event as saved, or None to drop it
 - after_exit(run, code), optional: fallbacks once the process has exited
 """

@@ -6,7 +6,8 @@ import subprocess
 import time
 from typing import Any
 
-from .config import AGENT_HOME, AGENT_USER, SAFE_ARG_RE
+from . import config
+from .config import AGENT_USER, SAFE_ARG_RE
 
 
 class JobFailed(Exception):
@@ -16,10 +17,11 @@ class JobFailed(Exception):
 def agent_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     """A minimal environment for a child process: no worker key and no token, unless the
     adapter that starts it adds its own (only Claude's does)."""
+    home = config.AGENT_HOME
     env = {
-        "HOME": str(AGENT_HOME),
+        "HOME": str(home),
         "USER": AGENT_USER,
-        "PATH": f"{AGENT_HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin",
+        "PATH": f"{home}/.local/bin:/usr/local/bin:/usr/bin:/bin",
         "LANG": os.environ.get("LANG", "C.UTF-8"),
         "GIT_TERMINAL_PROMPT": "0",
     }

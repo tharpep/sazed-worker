@@ -12,6 +12,7 @@ from sazed_worker.dispatch import run_agent
 from sazed_worker.dispatch.board import Board
 from sazed_worker.dispatch.mirror import Mirror
 from tests.test_dispatch_mirror import Recorder
+from tests.test_dispatch_steps import spec_for
 
 
 def sleeping(seconds: float) -> list[str]:
@@ -35,7 +36,7 @@ class Heartbeats(unittest.TestCase):
         """S4-3: beats arrive while the agent runs, and stop once it has exited (one in flight)."""
         with mock.patch.object(run_agent, "HEARTBEAT_S", 0.1):
             out = run_agent._run(
-                sleeping(0.7), self.tmp, {}, 30, self.tmp / "a.jsonl", self.mirror, "a"
+                spec_for(sleeping(0.7), self.tmp), self.tmp / "a.jsonl", self.mirror, "a"
             )
             after_exit = len(self.beats())
             threading.Event().wait(0.3)
@@ -51,8 +52,8 @@ class Heartbeats(unittest.TestCase):
         """S4-8: every beat fails, the run still ends normally and nothing raises."""
         dead = Mirror("http://127.0.0.1:1/api", "p1")
         with mock.patch.object(run_agent, "HEARTBEAT_S", 0.05):
-            out = run_agent._run(sleeping(0.4), self.tmp, {}, 30, self.tmp / "b.jsonl", dead, "b")
-        self.assertEqual((out["code"], out["timed_out"]), (0, False))
+            out = run_agent._run(spec_for(sleeping(0.4), self.tmp), self.tmp / "b.jsonl", dead, "b")
+        self.assertEqual((out["code"], out["stop_reason"]), (0, None))
         dead.heartbeat("b")
         self.assertFalse(dead.failed)
 

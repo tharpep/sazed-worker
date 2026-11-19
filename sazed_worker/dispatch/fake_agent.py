@@ -68,6 +68,10 @@ def main() -> None:
         else:
             block = {"type": "tool_use", "name": "Read", "input": {"file_path": "README.md"}}
             print(json.dumps({"type": "assistant", "message": {"content": [block]}}), flush=True)
+    elif mode == "tools":
+        for i in range(5):
+            block = {"type": "tool_use", "id": f"toolu_{i}", "name": "Grep", "input": {"p": "x"}}
+            print(json.dumps({"type": "assistant", "message": {"content": [block]}}), flush=True)
     elif mode == "hang":
         time.sleep(600)
     if is_agy:
