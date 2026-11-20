@@ -6,7 +6,6 @@ import io
 import json
 import os
 import shlex
-import socket
 import subprocess
 import sys
 import tempfile
@@ -211,12 +210,25 @@ class HandExport(ExportCase):
         self.assertEqual(proc.stdout.strip(), "https://pr/1")
 
 
+REGISTRIES = {
+    "/worker/agents/profiles": registry.ROWS,
+    "/worker/agents/mcp-servers": [{"name": "context7", "transport": "http", "url": "https://c7"}],
+}
+
+
 class FakeSazed(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.answer(200, REGISTRIES[self.path])
+
     def do_POST(self):
         server = self.server
         size = int(self.headers["Content-Length"])
         server.seen.append((self.path, dict(self.headers), json.loads(self.rfile.read(size))))
-        status, answer = server.answer
+        if server.answer is None:
+            return
+        self.answer(*server.answer)
+
+    def answer(self, status, answer):
         raw = json.dumps(answer).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -306,11 +318,8 @@ class UnattendedExport(ExportCase):
 
     def test_an_unreachable_sazed_is_export_unreachable(self):
         integrate.go(_plan(), self.ws, self.board, "main")
-        with socket.socket() as s:
-            s.bind(("127.0.0.1", 0))
-            closed = f"http://127.0.0.1:{s.getsockname()[1]}"
-        with mock.patch.object(sazed_api, "SAZED_URL", closed):
-            code, out = self.cli("export", "--unattended")
+        self.server.answer = None
+        code, out = self.cli("export", "--unattended")
         self.assertEqual(code, 1)
         self.assertRegex(
             out.strip(), r"^refused: Sazed could not be reached .*\(reason: export_unreachable\)$"
