@@ -48,14 +48,14 @@ def launch_args(spec: RunSpec) -> tuple[list[str], dict[str, str], dict[str, Any
 class Run:
     """Agent processes run one after another (a worker job's rounds), with totals across them."""
 
-    def __init__(self, sink: Sink, name: str = "run"):
+    def __init__(self, sink: Sink, name: str = "run", drain_s: float | None = None):
         self.sink = sink
         self.name = name
+        self.drain_s = drain_s
         self.spec: RunSpec | None = None
         self.deadline = 0.0
         self.tool_calls = 0
         self.tools_used: list[str] = []
-        self.events: list[Event] = []
         self.result: RunResult | None = None
         # Summed over every agent process of the job (first run, fix rounds, repair round), since
         # run_job swaps self.result between rounds and the last one alone undercounts the job.
@@ -83,7 +83,6 @@ class Run:
 
     def emit(self, event: Event) -> None:
         """A normalized event from the adapter; the tool cap counts its ToolCalls."""
-        self.events.append(event)
         if not isinstance(event, ToolCall):
             return
         self.tool_calls += 1
@@ -152,11 +151,19 @@ class Run:
             reader = threading.Thread(target=lambda: stderr_tail.extend(proc.stderr), daemon=True)
             reader.start()
         threading.Thread(target=self._watch, args=(proc,), daemon=True).start()
+        stdout = None
         try:
-            for line in proc.stdout:
-                self._line(agent, line)
-            code = proc.wait()
-            if self._ending_after_exit:
+            if self.drain_s is None:
+                for line in proc.stdout:
+                    self._line(agent, line)
+                code = proc.wait()
+            else:
+                stdout = threading.Thread(target=self._read, args=(agent, proc), daemon=True)
+                stdout.start()
+                code = proc.wait()
+                kill_group(proc)
+                stdout.join(timeout=self.drain_s)
+            if self._ending_after_exit and spec.harness_stops:
                 self.stop(self._ending_after_exit)
             after_exit = getattr(agent, "after_exit", None)
             if after_exit:
@@ -164,13 +171,18 @@ class Run:
             return code
         finally:
             kill_group(proc)  # also reaps background children the agent left behind
-            proc.stdout.close()
+            if stdout is None or not stdout.is_alive():
+                proc.stdout.close()
             if reader:
                 reader.join(timeout=5)
                 self.stderr = "".join(stderr_tail)[-4000:]
             else:
                 self.stderr = spec.stderr_path.read_text()[-4000:]
             self._cancel_if(self.sink.close())
+
+    def _read(self, agent: Any, proc: subprocess.Popen) -> None:
+        for line in proc.stdout:
+            self._line(agent, line)
 
     def _line(self, agent: Any, line: str) -> None:
         text = line.strip()

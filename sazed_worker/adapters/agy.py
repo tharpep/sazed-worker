@@ -34,13 +34,13 @@ def command(spec: RunSpec) -> list[str]:
     if job:
         cmd.append(f"--prompt={spec.prompt}")
     cmd += ["--output-format=stream-json", f"--model={spec.model}"]
-    if job:
-        cmd.append(f"--print-timeout={spec.timeout_s}s")
+    if spec.print_timeout_s is not None:
+        cmd.append(f"--print-timeout={spec.print_timeout_s}s")
     if spec.effort:
         cmd.append(f"--effort={spec.effort}")
     if spec.permission_mode == "bypassPermissions":
         cmd.append("--dangerously-skip-permissions")
-    if not job:
+    if not spec.slash_commands:
         cmd.append("--disable-slash-commands")
     if spec.output_schema is not None:
         cmd += ["--json-schema", json.dumps(spec.output_schema)]

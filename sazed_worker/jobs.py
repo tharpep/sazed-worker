@@ -11,7 +11,7 @@ from .changes import changed_files
 from .check_result import check_result
 from .checks import Checks, checks_prompt
 from .config import JOBS_DIR, log
-from .job_spec import job_spec
+from .job_spec import job_limits, job_spec
 from .pr_checks import pr_checks, pr_diff
 from .repo import prepare_repo, repo_instructions, workspace
 from .report import repair_prompt, report_problem
@@ -51,6 +51,7 @@ def _review_checks(
 def run_job(job: dict[str, Any]) -> dict[str, Any]:
     """Run one job to completion and return the finish payload for Sazed."""
     ws = workspace(job["id"])
+    job_limits(job)
     run = Run(JobEvents(job["id"]), f"job {job['id']}")
     changes: dict[str, str | None] = {}
     lint_meta: dict[str, Any] = {}

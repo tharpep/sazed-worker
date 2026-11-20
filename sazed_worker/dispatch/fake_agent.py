@@ -38,7 +38,7 @@ def main() -> None:
         print(
             json.dumps({"type": "system", "subtype": "init", "session_id": session}), flush=True
         )
-    state, extra = "done", {}
+    state, extra, ending = "done", {}, {}
     if mode == "inside":
         _commit(_target(owns, task), f"{task}\n", f"{task}: work")
     elif mode == "outside":
@@ -72,6 +72,25 @@ def main() -> None:
         for i in range(5):
             block = {"type": "tool_use", "id": f"toolu_{i}", "name": "Grep", "input": {"p": "x"}}
             print(json.dumps({"type": "assistant", "message": {"content": [block]}}), flush=True)
+    elif mode == "multi":
+        blocks = [
+            {"type": "tool_use", "id": f"toolu_{i}", "name": "Read", "input": {"p": "x"}}
+            for i in range(3)
+        ]
+        print(json.dumps({"type": "assistant", "message": {"content": blocks}}), flush=True)
+    elif mode == "subagent":
+        task_use = {"type": "tool_use", "id": "toolu_t", "name": "Task", "input": {"p": "x"}}
+        print(json.dumps({"type": "assistant", "message": {"content": [task_use]}}), flush=True)
+        inner = {"type": "tool_use", "id": "toolu_i", "name": "mcp__c7__query", "input": {}}
+        event = {"type": "assistant", "parent_tool_use_id": "toolu_t",
+                 "message": {"content": [inner]}}
+        print(json.dumps(event), flush=True)
+    elif mode == "ratelimit":
+        info = {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": 1794103800}
+        print(json.dumps({"type": "rate_limit_event", "rate_limit_info": info}), flush=True)
+        time.sleep(5)
+    elif mode in ("refusal", "max_tokens"):
+        ending = {"subtype": "error_during_execution", "is_error": True, "stop_reason": mode}
     elif mode == "hang":
         time.sleep(600)
     if is_agy:
@@ -103,6 +122,7 @@ def main() -> None:
                     "num_turns": 1,
                     "structured_output": {"state": state, "summary": f"{task} {mode}"} | extra,
                 }
+                | ending
             ),
             flush=True,
         )

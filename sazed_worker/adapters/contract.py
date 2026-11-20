@@ -9,7 +9,6 @@ RunnerStop = Literal["cancelled", "timed_out", "tool_cap", "shutdown", "rate_lim
 HarnessStop = Literal["budget", "refusal", "max_tokens"]
 StopReason = RunnerStop | HarnessStop
 STOP_REASONS: frozenset[str] = frozenset(get_args(RunnerStop) + get_args(HarnessStop))
-HARNESS_STOPS: frozenset[str] = frozenset(get_args(HarnessStop))
 
 
 @dataclass(frozen=True)
@@ -40,6 +39,9 @@ class RunSpec:
     output_schema: dict[str, Any] | None = None
     resume: str | None = None
     stderr_path: Path | None = None
+    print_timeout_s: int | None = None
+    slash_commands: bool = True
+    harness_stops: bool = False
 
 
 @dataclass(frozen=True)

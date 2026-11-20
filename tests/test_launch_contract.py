@@ -99,14 +99,24 @@ class Spec(unittest.TestCase):
         self.assertEqual((out.returncode, out.stdout.strip()), (0, "lookup deferred"), out.stderr)
 
 
+class Recording(Run):
+    def __init__(self):
+        super().__init__(Quiet())
+        self.seen = []
+
+    def emit(self, event):
+        self.seen.append(event)
+        super().emit(event)
+
+
 class Events(unittest.TestCase):
     def setUp(self):
-        self.run = Run(Quiet())
+        self.run = Recording()
         self.run.spec = spec(max_tool_calls=3)
 
     def test_a_tool_use_comes_out_as_a_normalized_tool_call(self):
         claude.handle_event(self.run, tool_use(1, "Grep"))
-        self.assertEqual(self.run.events, [ToolCall("toolu_1", "Grep", "search", "pending")])
+        self.assertEqual(self.run.seen, [ToolCall("toolu_1", "Grep", "search", "pending")])
         self.assertEqual((self.run.tool_calls, self.run.tools_used), (1, ["Grep"]))
 
     def test_the_cap_counts_tool_calls(self):
@@ -135,7 +145,7 @@ class Events(unittest.TestCase):
             "turns": 3, "duration_seconds": 1.5, "session_id": "s1", "cost_usd": 0.25,
             "structured_output": {"state": "done"}, "denied": [denial],
         })
-        self.assertEqual(self.run.events, [PermissionDenied("Write", "toolu_9")])
+        self.assertEqual(self.run.seen, [PermissionDenied("Write", "toolu_9")])
 
 
 class StopReasons(unittest.TestCase):
@@ -159,13 +169,15 @@ class StopReasons(unittest.TestCase):
             self.assertEqual(len(assigned), expected, f"{path} sets stop_reason directly")
 
     def test_a_harness_ending_applies_after_exit_without_a_kill(self):
+        """Only a spec that asks for harness stops gets one; worker jobs keep none (S2-7)."""
         event = ('{"type": "result", "subtype": "error_max_budget_usd", "is_error": true, '
                  '"total_cost_usd": 2.1}')
         code = f"import sys, time; print({event!r}, flush=True); time.sleep(0.5); sys.exit(1)"
-        run = Run(Quiet())
-        exit_code = run.run(spec(binary=(sys.executable, "-c", code)))
-        self.assertEqual((exit_code, run.stop_reason), (1, "budget"))
-        self.assertEqual(run.result["cost_usd"], 2.1)
+        for asked, expected in ((True, "budget"), (False, None)):
+            run = Run(Quiet())
+            exit_code = run.run(spec(binary=(sys.executable, "-c", code), harness_stops=asked))
+            self.assertEqual((exit_code, run.stop_reason), (1, expected))
+            self.assertEqual(run.result["cost_usd"], 2.1)
 
 
 if __name__ == "__main__":

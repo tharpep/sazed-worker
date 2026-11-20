@@ -5,6 +5,7 @@ import os
 import queue
 import shlex
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,14 @@ EVIDENCE_TOOLS = (
     "list_dir",
 )
 READ_ONLY_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "Bash")
+STOPPED_LINES = {
+    "refusal": "the model refused to continue",
+    "max_tokens": "stopped at the model's output token limit",
+    "shutdown": "stopped because dispatch was shutting down",
+    "cancelled": "cancelled",
+}
+DRAIN_S = 5
+CLOSE_S = 10
 # Sazed's reaper fails a running task after DISPATCH_HEARTBEAT_GRACE_S (150 s) without one.
 HEARTBEAT_S = 30
 
@@ -136,9 +145,16 @@ def task_spec(
         "as_agent": False,
         "argv_layout": "dispatch",
         "stderr_path": stderr_path,
+        "harness_stops": True,
     }
     if cfg.get("engine") == "agy":
-        return RunSpec(engine="agy", binary=_agy(), permission_mode="bypassPermissions", **common)
+        return RunSpec(
+            engine="agy",
+            binary=_agy(),
+            permission_mode="bypassPermissions",
+            slash_commands=False,
+            **common,
+        )
     grant = grant or mcp.Grant()
     return RunSpec(
         engine="claude",
@@ -248,6 +264,7 @@ class TaskSink:
 
     def __init__(self, log: Path, mirror: Mirror | None, task: str, worktree: str):
         self.file = log.open("a")
+        self.closed = False
         self.evidence = 0
         self.steps = StepSender(mirror, task, worktree)
         self.readings = ReadingSender(mirror)
@@ -265,6 +282,8 @@ class TaskSink:
             self.readings.add(event)
 
     def event(self, line: str, event: dict[str, Any] | None, saved: dict[str, Any] | None) -> bool:
+        if self.closed:
+            return False
         self.file.write(line)
         if event is not None and line.startswith("{"):
             self.evidence += _reads(event)
@@ -275,25 +294,50 @@ class TaskSink:
         return False
 
     def close(self) -> bool:
+        """Beats stop now; the step sender closes only after the mirror thread, within CLOSE_S."""
+        if self.closed:
+            return False
+        self.closed = True
         self.stop_beats.set()
         self.file.close()
         self.queue.put(None)
-        self.mirrored.join(timeout=10)
-        self.steps.close()
+
+        def drain() -> None:
+            self.mirrored.join()
+            self.steps.close()
+
+        closing = threading.Thread(target=drain, daemon=True)
+        closing.start()
+        closing.join(timeout=CLOSE_S)
         return False
 
 
 def _run(spec: RunSpec, log: Path, mirror: Mirror | None = None, task: str = "") -> dict[str, Any]:
     sink = TaskSink(log, mirror, task, str(spec.cwd))
-    run = Run(sink, f"task {task}")
-    code = run.run(spec)
+    run = Run(sink, f"task {task}", drain_s=DRAIN_S)
+    try:
+        code = run.run(spec)
+    except BaseException:
+        sink.close()
+        raise
     return {
         "code": code,
         "stop_reason": run.stop_reason,
+        "rate_limited": run.rate_limited,
         "result": run.result,
         "evidence": sink.evidence,
         "stderr": run.stderr[-500:],
     }
+
+
+def _limit_line(limited: dict[str, Any] | None) -> str:
+    limited = limited or {}
+    window = (limited.get("window") or "usage").replace("_", " ")
+    line = f"hit Pryce's {window} plan limit"
+    if isinstance(limited.get("resets_at"), (int, float)):
+        reset = datetime.fromtimestamp(limited["resets_at"], UTC).strftime("%Y-%m-%d %H:%M")
+        line += f"; it resets at {reset} UTC"
+    return line
 
 
 def _finish(
@@ -321,6 +365,10 @@ def _finish(
         return board.write(task.id, "failed", line, **common)
     if stopped == "budget":
         return board.write(task.id, "failed", "went over its budget", **common)
+    if stopped == "rate_limit":
+        return board.write(task.id, "failed", _limit_line(outcome["rate_limited"]), **common)
+    if stopped in STOPPED_LINES:
+        return board.write(task.id, "failed", STOPPED_LINES[stopped], **common)
     if not outcome["result"]:
         detail = outcome["stderr"].strip()[-200:] or "no output"
         return board.write(

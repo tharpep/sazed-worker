@@ -10,16 +10,23 @@ from .agent_process import safe_arg
 from .config import DEADLINE_GRACE_S
 
 
+def job_limits(job: dict[str, Any]) -> tuple[int, int]:
+    """The job's timeout and tool cap; a NULL either way raises, before any work starts."""
+    params = job.get("params") or {}
+    return int(params.get("timeout_s", 300)), int(params.get("max_tool_calls", 40))
+
+
 def job_spec(job: dict[str, Any], prompt: str, resume: str | None, cwd: Path) -> RunSpec:
     """Minimal environment, the agent user, the job's timeout plus grace and its tool cap."""
     params = job.get("params") or {}
     model = safe_arg(job["model"], "model")
+    timeout_s, max_tool_calls = job_limits(job)
     common: dict[str, Any] = {
         "prompt": prompt,
         "cwd": cwd,
-        "timeout_s": int(params.get("timeout_s", 300)),
+        "timeout_s": timeout_s,
         "grace_s": DEADLINE_GRACE_S,
-        "max_tool_calls": int(params.get("max_tool_calls", 40)),
+        "max_tool_calls": max_tool_calls,
         "env": "minimal",
         "as_agent": True,
         "argv_layout": "job",
@@ -33,6 +40,7 @@ def job_spec(job: dict[str, Any], prompt: str, resume: str | None, cwd: Path) ->
             model=model,
             permission_mode="default",
             effort=effort,
+            print_timeout_s=timeout_s,
             resume=safe_arg(resume, "session id") if resume else None,
             env_extra=agy.extra_env(),
             **common,
