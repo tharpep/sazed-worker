@@ -38,8 +38,8 @@ SHARED_UMASK = 0o022
 
 def _load(args: argparse.Namespace, resolves: bool = True) -> tuple[plans.Plan, dict]:
     if resolves:
-        profiles.load()
-        mcp.load()
+        profiles.load(args.unattended)
+        mcp.load(args.unattended)
     loaded = plans.load(Path(args.plan))
     config = plans.load_config(Path(args.config) if args.config else None)
     config["unattended"] = args.unattended

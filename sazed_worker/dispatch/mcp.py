@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from sazed_worker.dispatch import profiles
+
 TIMEOUT_S = 3
 _VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
@@ -40,9 +42,14 @@ def _table(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {r["name"]: r for r in rows}
 
 
-def load() -> tuple[dict[str, dict[str, Any]], str]:
+def load(unattended: bool = False) -> tuple[dict[str, dict[str, Any]], str]:
     """Fetch the registry once, remember it for build, and return it with its source."""
     global _active
+    if unattended:
+        # Never read or write the cache here: a root-owned cache would block the next hand run.
+        path = "/worker/agents/mcp-servers"
+        _active = (profiles.fetch_unattended(path, "the MCP registry", _table), "sazed")
+        return _active
     base = os.environ.get("DISPATCH_SAZED_URL")
     path = cache_path()
     found: tuple[dict[str, dict[str, Any]], str] = ({}, "none")

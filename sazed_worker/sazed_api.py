@@ -1,4 +1,4 @@
-"""Sazed's worker API: claim, events and finish all go through `post`."""
+"""Sazed's worker API: claim, events and finish go through `post`, registry reads through `get`."""
 
 import json
 import urllib.error
@@ -17,6 +17,18 @@ def post(path: str, body: dict[str, Any], timeout: float = 30) -> tuple[int, Any
         headers={"Content-Type": "application/json", "X-Worker-Key": WORKER_KEY},
         method="POST",
     )
+    return _send(req, timeout)
+
+
+def get(path: str, headers: dict[str, str] | None = None, timeout: float = 30) -> tuple[int, Any]:
+    """GET from Sazed with the worker key. Never raises, like `post`."""
+    req = urllib.request.Request(
+        f"{SAZED_URL}{path}", headers=(headers or {}) | {"X-Worker-Key": WORKER_KEY}
+    )
+    return _send(req, timeout)
+
+
+def _send(req: urllib.request.Request, timeout: float) -> tuple[int, Any]:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read()

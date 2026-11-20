@@ -1,12 +1,15 @@
-"""Agent profiles: Sazed's registry first, then the local cache of its last answer."""
+"""Agent profiles: Sazed's registry, then the cache of its last answer; unattended, Sazed only."""
 
 import json
 import os
 import sys
 import time
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+from sazed_worker import sazed_api
 
 TIMEOUT_S = 3
 SHAPE_V2 = {"X-Sazed-Shape": "2"}
@@ -59,9 +62,37 @@ def _table(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {r["name"]: _settings(r) for r in rows}
 
 
-def load() -> tuple[dict[str, dict[str, Any]], str]:
+def fetch_unattended(
+    path: str,
+    what: str,
+    table: Callable[[list[Any]], dict[str, dict[str, Any]]],
+    headers: dict[str, str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """A registry from Sazed's worker routes, or ProfilesError in one sentence; never a cache."""
+    status, body = sazed_api.get(path, headers, TIMEOUT_S)
+    lead = f"an unattended run needs {what} fresh from Sazed, and "
+    if status == 0:
+        raise ProfilesError(f"{lead}Sazed at {sazed_api.SAZED_URL} could not be reached ({body})")
+    if status != 200:
+        raise ProfilesError(f"{lead}{path} answered {status}")
+    if not isinstance(body, list) or not body:
+        raise ProfilesError(f"{lead}{path} did not answer a non-empty list")
+    try:
+        return table(body)
+    except (KeyError, TypeError, AttributeError) as e:
+        raise ProfilesError(f"{lead}{path} answered a malformed entry ({e!r})") from e
+
+
+def load(unattended: bool = False) -> tuple[dict[str, dict[str, Any]], str]:
     """Fetch once, remember the result for resolve, and return it with its source."""
     global _active
+    if unattended:
+        # Never read or write the cache here: a root-owned cache would block the next hand run.
+        _active = (
+            fetch_unattended("/worker/agents/profiles", "agent profiles", _table, SHAPE_V2),
+            "sazed",
+        )
+        return _active
     base = os.environ.get("DISPATCH_SAZED_URL")
     path = cache_path()
     if base:
