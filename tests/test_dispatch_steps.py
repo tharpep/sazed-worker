@@ -1,5 +1,6 @@
 """Dispatch posts each agent step to Sazed as it happens, in batches, best-effort."""
 
+import dataclasses
 import json
 import sys
 import tempfile
@@ -9,8 +10,9 @@ import unittest
 from http.server import HTTPServer
 from pathlib import Path
 
+from sazed_worker.adapters.contract import RunSpec
 from sazed_worker.dispatch.mirror import Mirror
-from sazed_worker.dispatch.run_agent import _run
+from sazed_worker.dispatch.run_agent import _run, task_spec
 from sazed_worker.dispatch.steps import StepSender, event_steps
 from tests.test_dispatch_mirror import Recorder
 
@@ -25,6 +27,13 @@ def tool_event(path: str, name: str = "Read") -> dict:
 def emitting(events: list[dict]) -> list[str]:
     code = "import sys,json; [print(json.dumps(e), flush=True) for e in json.loads(sys.argv[1])]"
     return [sys.executable, "-c", code, json.dumps(events)]
+
+
+def spec_for(argv: list[str], cwd: Path, timeout_s: int = 30) -> RunSpec:
+    """A hand run's spec whose agent binary is argv."""
+    cfg = {"model": "m", "timeout_s": timeout_s}
+    spec = task_spec(cfg, cwd, "p", cwd / "s.json", False, stderr_path=cwd / "agent.stderr")
+    return dataclasses.replace(spec, binary=tuple(argv))
 
 
 class Converting(unittest.TestCase):
@@ -204,8 +213,8 @@ class Posting(unittest.TestCase):
             {"type": "result", "subtype": "success"},
         ]
         log = tmp / "agent.jsonl"
-        out = _run(emitting(events), tmp, {}, 30, log, self.mirror, "a")
-        self.assertEqual(out["result"]["subtype"], "success")
+        out = _run(spec_for(emitting(events), tmp), log, self.mirror, "a")
+        self.assertTrue(out["result"]["ok"])
         self.assertEqual(len(log.read_text().splitlines()), 4)
         steps = [s for _, _, b in self.server.seen for s in b["steps"]]
         self.assertEqual(
@@ -219,7 +228,7 @@ class Posting(unittest.TestCase):
 
     def test_with_no_mirror_nothing_is_sent(self):
         tmp = Path(tempfile.mkdtemp(prefix="dispatch-steps-"))
-        out = _run(emitting([tool_event("x")]), tmp, {}, 30, tmp / "agent.jsonl")
+        out = _run(spec_for(emitting([tool_event("x")]), tmp), tmp / "agent.jsonl")
         sender = StepSender(None, "a", WT)
         sender.add(tool_event("x"))
         sender.close()

@@ -17,7 +17,8 @@ _active: tuple[dict[str, dict[str, Any]], str] = ({}, "none")
 
 @dataclass
 class Grant:
-    args: list[str] = field(default_factory=list)
+    config: Path | None = None
+    allowed: list[str] = field(default_factory=list)
     note: str = ""
 
 
@@ -83,7 +84,7 @@ def _server(spec: dict[str, Any], env: dict[str, str]) -> dict[str, Any]:
 
 
 def build(grants: dict[str, list[str]], run_dir: Path, env: dict[str, str] | None = None) -> Grant:
-    """Write run_dir/mcp.json for the granted servers and return the flags to pass."""
+    """Write run_dir/mcp.json for the granted servers and return it with the tools to allow."""
     env = os.environ if env is None else env
     registry, _ = current()
     servers: dict[str, Any] = {}
@@ -106,11 +107,11 @@ def build(grants: dict[str, list[str]], run_dir: Path, env: dict[str, str] | Non
         if skipped:
             note += " (" + "; ".join(skipped) + ")"
     if not servers:
-        return Grant([], note)
+        return Grant(note=note)
     run_dir.mkdir(parents=True, exist_ok=True)
     path = run_dir / "mcp.json"
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
         f.write(json.dumps({"mcpServers": servers}, indent=2))
     path.chmod(0o600)
-    return Grant(["--mcp-config", str(path), "--allowedTools", ",".join(allowed)], note)
+    return Grant(path, allowed, note)

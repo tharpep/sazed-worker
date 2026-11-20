@@ -95,6 +95,12 @@ def resolve(task: Task, config: dict[str, Any]) -> dict[str, Any]:
     missing = [k for k in REQUIRED if merged.get(k) in (None, "")]
     if missing:
         raise PlanError(f"task {task.id}: no {', '.join(missing)}")
+    cap = merged.get("max_tool_calls")
+    if cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or cap < 1):
+        raise PlanError(
+            f"task {task.id}: max_tool_calls must be a whole number of 1 or more, or none, "
+            f"not {cap!r}"
+        )
     return merged | {"profile": task.profile, "profile_source": source}
 
 

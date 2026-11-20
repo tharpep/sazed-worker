@@ -5,12 +5,12 @@ import unittest
 os.environ.setdefault("SAZED_AGENT_USER", getpass.getuser())
 
 from sazed_worker.adapters import agy
-from sazed_worker.run import Run
+from sazed_worker.run import JobEvents, Run
 
 
 class AgyAdapter(unittest.TestCase):
     def test_handle_event_counts_regular_tool(self):
-        run = Run({"id": "j1", "params": {}})
+        run = Run(JobEvents("j1"))
         event = {
             "step_update": {
                 "step_type": "tool",
@@ -23,7 +23,7 @@ class AgyAdapter(unittest.TestCase):
         self.assertEqual(run.tools_used, ["read_file"])
 
     def test_handle_event_extracts_inner_mcp_tool_name(self):
-        run = Run({"id": "j1", "params": {}})
+        run = Run(JobEvents("j1"))
         event = {
             "step_update": {
                 "step_type": "tool",
@@ -44,7 +44,7 @@ class AgyAdapter(unittest.TestCase):
         self.assertEqual(run.tools_used, ["homelab_overview"])
 
     def test_handle_event_records_result_and_session(self):
-        run = Run({"id": "j1", "params": {}})
+        run = Run(JobEvents("j1"))
         event = {
             "event": "result",
             "result": {

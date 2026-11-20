@@ -1,22 +1,42 @@
 """Settings from the environment, the agent user's paths, limits, the logger and the stop flag."""
 
+import functools
 import logging
 import os
 import pwd
 import re
 import threading
 from pathlib import Path
+from typing import Any
 
 SAZED_URL = os.environ.get("SAZED_URL", "http://192.168.50.155:8000").rstrip("/")
 WORKER_KEY = os.environ.get("SAZED_WORKER_KEY", "")
 CLAUDE_TOKEN = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
 AGENT_USER = os.environ.get("SAZED_AGENT_USER", "agent")
-_AGENT_PW = pwd.getpwnam(AGENT_USER)
-AGENT_HOME = Path(_AGENT_PW.pw_dir)
-AGENT_UID, AGENT_GID = _AGENT_PW.pw_uid, _AGENT_PW.pw_gid
-JOBS_DIR = AGENT_HOME / "jobs"
-AGY = str(AGENT_HOME / ".local/bin/agy")
-CLAUDE = str(AGENT_HOME / ".local/bin/claude")
+_AGENT_NAMES = frozenset(("AGENT_HOME", "AGENT_UID", "AGENT_GID", "JOBS_DIR", "AGY", "CLAUDE"))
+
+
+@functools.cache
+def _agent_paths() -> dict[str, Any]:
+    pw = pwd.getpwnam(AGENT_USER)
+    home = Path(pw.pw_dir)
+    return {
+        "AGENT_HOME": home,
+        "AGENT_UID": pw.pw_uid,
+        "AGENT_GID": pw.pw_gid,
+        "JOBS_DIR": home / "jobs",
+        "AGY": str(home / ".local/bin/agy"),
+        "CLAUDE": str(home / ".local/bin/claude"),
+    }
+
+
+def __getattr__(name: str) -> Any:
+    """The agent user's paths, looked up on first use (S2-6)."""
+    if name not in _AGENT_NAMES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return _agent_paths()[name]
+
+
 RUFF = "/usr/local/bin/ruff"  # lint pre-check for change jobs (run by the worker, not the agent)
 # The other checks the worker runs on change jobs (checks.py); install-tools.sh puts them here.
 BASH = "/bin/bash"

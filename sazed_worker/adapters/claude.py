@@ -1,10 +1,12 @@
 """Claude Code (`claude -p`): profiles, its command line, and how its stream-json is read."""
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..agent_process import safe_arg
-from ..config import CLAUDE, CLAUDE_TOKEN, TOOL_RESULT_PREVIEW
+from .. import config
+from ..config import CLAUDE_TOKEN, TOOL_RESULT_PREVIEW
+from .contract import HarnessStop, PermissionDenied, RunSpec, ToolCall, tool_kind
 
 if TYPE_CHECKING:
     from ..run import Run
@@ -28,10 +30,11 @@ RESUMES = True
 TOOL_POLICY = "allowlist"  # --tools and --allowedTools per profile; dontAsk refuses the rest
 # --setting-sources=user: Claude Code loads none of the checkout's CLAUDE.md or AGENTS.md here.
 READS_CONTEXT: tuple[str, ...] = ()
+PERMISSION_MODES = frozenset({"dontAsk", "acceptEdits"})
 
 
 def available() -> bool:
-    return Path(CLAUDE).exists() and bool(CLAUDE_TOKEN)
+    return Path(config.CLAUDE).exists() and bool(CLAUDE_TOKEN)
 
 
 def extra_env() -> dict[str, str]:
@@ -39,28 +42,55 @@ def extra_env() -> dict[str, str]:
     return {"CLAUDE_CODE_OAUTH_TOKEN": CLAUDE_TOKEN, "DISABLE_AUTOUPDATER": "1"}
 
 
-def command(job: dict[str, Any], prompt: str, resume: str | None) -> list[str]:
-    tools, allowed = PROFILES[job["profile"]]
+def command(spec: RunSpec) -> list[str]:
+    if spec.permission_mode not in PERMISSION_MODES:
+        raise ValueError(f"claude can't set permission mode {spec.permission_mode!r}")
+    if not spec.setting_sources:
+        raise ValueError("a claude run needs its setting sources named")
+    job = spec.argv_layout == "job"
+
+    def opt(flag: str, value: str) -> list[str]:
+        return [f"{flag}={value}"] if job else [flag, value]
+
+    def many(flag: str, values: tuple[str, ...]) -> list[str]:
+        return [flag, *values] if job else [flag, ",".join(values)]
+
+    mode = opt("--permission-mode", spec.permission_mode)
     cmd = [
-        CLAUDE,
-        "--print",
-        "--output-format=stream-json",
+        *spec.binary,
+        "--print" if job else "-p",
+        *opt("--output-format", "stream-json"),
         "--verbose",  # required for stream-json in print mode
-        f"--model={safe_arg(job['model'], 'model')}",
-        "--permission-mode=dontAsk",
-        # Only the agent user's own settings: a repo's .claude/settings.json (hooks!) is ignored.
-        "--setting-sources=user",
-        "--strict-mcp-config",
-        f"--tools={tools}",
-        "--allowedTools",
-        *allowed,
-        "--disallowedTools",
-        *SECRET_READS,
+        *opt("--model", spec.model),
     ]
-    if resume:
-        cmd.append(f"--resume={safe_arg(resume, 'session id')}")
+    if spec.effort:
+        cmd += opt("--effort", spec.effort)
+    if spec.settings:
+        cmd += opt("--settings", str(spec.settings))
+    if job:
+        cmd += mode
+    # pinned by test_claude_always_isolates_settings_and_mcp
+    cmd += [*opt("--setting-sources", spec.setting_sources), "--strict-mcp-config"]
+    if not job:
+        cmd += mode
+    if spec.tools is not None:
+        cmd += opt("--tools", spec.tools)
+    if spec.budget_usd is not None:
+        cmd += opt("--max-budget-usd", str(spec.budget_usd))
+    if spec.output_schema is not None:
+        cmd += opt("--json-schema", json.dumps(spec.output_schema))
+    if job and spec.allowed_tools:
+        cmd += many("--allowedTools", spec.allowed_tools)
+    if spec.denied_tools:
+        cmd += many("--disallowedTools", spec.denied_tools)
+    if spec.mcp_config:
+        cmd += opt("--mcp-config", str(spec.mcp_config))
+    if not job and spec.allowed_tools:
+        cmd += many("--allowedTools", spec.allowed_tools)
+    if spec.resume:
+        cmd += opt("--resume", spec.resume)
     # The prompt goes last, after "--", so it can never be read as an option.
-    return [*cmd, "--", prompt]
+    return [*cmd, "--", spec.prompt]
 
 
 def _rate_limit_reading(event: dict[str, Any]) -> dict[str, Any] | None:
@@ -91,7 +121,7 @@ def _limited(run: "Run", window: str | None, resets_at: Any) -> None:
     """Pryce's plan refused the run: stop it as rate_limit (Sazed pauses it until the reset)."""
     if run.rate_limited is None:
         run.rate_limited = {"window": window, "resets_at": resets_at}
-    run.stop_reason = run.stop_reason or "rate_limit"
+    run.stop("rate_limit")
 
 
 def after_exit(run: "Run", code: int) -> None:
@@ -123,7 +153,9 @@ def handle_event(run: "Run", event: dict[str, Any]) -> None:
         content = message.get("content") if isinstance(message, dict) else None
         for block in content if isinstance(content, list) else []:
             if isinstance(block, dict) and block.get("type") == "tool_use":
-                run.count_tool(str(block.get("name") or "?"))
+                name = str(block.get("name") or "?")
+                call_id = block.get("id") if isinstance(block.get("id"), str) else None
+                run.emit(ToolCall(call_id, name, tool_kind(name), "pending"))
     if event.get("type") == "result" and event.get("api_error") == "usage_limit_reached":
         last = run.rate_limits.get("last") or {}
         window = max(
@@ -133,15 +165,34 @@ def handle_event(run: "Run", event: dict[str, Any]) -> None:
         )
         _limited(run, window[1], window[2])
     if event.get("type") == "result":
+        ok = not event.get("is_error") and event.get("subtype") == "success"
+        denied = event.get("permission_denials") or None
+        for item in denied or []:
+            item = item if isinstance(item, dict) else {"tool_name": str(item)}
+            run.emit(PermissionDenied(str(item.get("tool_name") or "?"), item.get("tool_use_id")))
         run.record_result({
             "response": str(event.get("result") or "").strip(),
-            "ok": not event.get("is_error") and event.get("subtype") == "success",
+            "ok": ok,
             "error": event.get("result") if event.get("is_error") else None,
             "usage": event.get("usage"),
             "duration_seconds": (event.get("duration_ms") or 0) / 1000,
-            "denied": event.get("permission_denials") or None,
+            "denied": denied,
             "turns": event.get("num_turns"),
-        })
+            "session_id": event.get("session_id"),
+            "cost_usd": event.get("total_cost_usd"),
+            "structured_output": event.get("structured_output"),
+        }, ending=_ending(event, ok))
+
+
+def _ending(event: dict[str, Any], ok: bool) -> HarnessStop | None:
+    """How the harness itself ended a run that didn't succeed, if it said."""
+    if event.get("subtype") == "error_max_budget_usd":
+        return "budget"
+    if not ok and event.get("stop_reason") == "refusal":
+        return "refusal"
+    if not ok and event.get("stop_reason") == "max_tokens":
+        return "max_tokens"
+    return None
 
 
 def trim_event(event: dict[str, Any]) -> dict[str, Any]:
