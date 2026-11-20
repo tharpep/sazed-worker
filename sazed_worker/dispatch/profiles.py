@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
@@ -62,23 +63,38 @@ def _table(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     return {r["name"]: _settings(r) for r in rows}
 
 
+def _without_userinfo() -> str:
+    parts = urllib.parse.urlsplit(sazed_api.SAZED_URL)
+    return parts._replace(netloc=parts.netloc.rpartition("@")[2]).geturl()
+
+
 def fetch_unattended(
     path: str,
     what: str,
     table: Callable[[list[Any]], dict[str, dict[str, Any]]],
     headers: dict[str, str] | None = None,
+    may_be_empty: bool = False,
 ) -> dict[str, dict[str, Any]]:
     """A registry from Sazed's worker routes, or ProfilesError in one sentence; never a cache."""
     status, body = sazed_api.get(path, headers, TIMEOUT_S)
     lead = f"an unattended run needs {what} fresh from Sazed, and "
     if status == 0:
-        raise ProfilesError(f"{lead}Sazed at {sazed_api.SAZED_URL} could not be reached ({body})")
+        raise ProfilesError(f"{lead}Sazed at {_without_userinfo()} could not be reached ({body})")
+    if status == 404:
+        raise ProfilesError(
+            f"{lead}{path} answered 404, so Sazed may predate the worker registry routes"
+        )
     if status != 200:
         raise ProfilesError(f"{lead}{path} answered {status}")
-    if not isinstance(body, list) or not body:
-        raise ProfilesError(f"{lead}{path} did not answer a non-empty list")
     try:
-        return table(body)
+        rows = json.loads(body)
+    except ValueError:
+        raise ProfilesError(f"{lead}{path} answered, but not with JSON") from None
+    if not isinstance(rows, list) or not (rows or may_be_empty):
+        kind = "a list" if may_be_empty else "a non-empty list"
+        raise ProfilesError(f"{lead}{path} did not answer {kind}")
+    try:
+        return table(rows)
     except (KeyError, TypeError, AttributeError) as e:
         raise ProfilesError(f"{lead}{path} answered a malformed entry ({e!r})") from e
 

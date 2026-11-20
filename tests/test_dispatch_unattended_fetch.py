@@ -31,7 +31,7 @@ class Routes(BaseHTTPRequestHandler):
             time.sleep(1)
             return
         status, body = answer
-        raw = json.dumps(body).encode()
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
@@ -113,27 +113,33 @@ class Fetched(Case):
         )
         self.assertEqual(self.worker.seen, [])
 
+    def test_an_empty_mcp_registry_is_a_valid_answer(self):
+        self.worker.routes[SERVERS] = (200, [])
+        self.assertEqual(mcp.load(unattended=True), ({}, "sazed"))
+
 
 class Refused(Case):
     def test_each_failure_refuses_in_one_sentence_and_never_reads_the_cache(self):
-        """Proves a 401, a timeout, an empty list, a non-list body and a malformed entry each
-        raise one sentence, for both registries, while a valid cache sits on disk unread."""
+        """Proves a 401, a 404, a timeout, a non-JSON body, a non-list body and a malformed entry
+        each raise one sentence for both registries, and an empty list for profiles, while a
+        valid cache sits on disk unread."""
         registry.write_cache(profiles.cache_path().parent)
         mcp.cache_path().write_text(json.dumps([CONTEXT7]))
         cases = {
             "401": ((401, {"detail": "bad worker key"}), "answered 401"),
-            "empty": ((200, []), "did not answer a non-empty list"),
-            "not a list": ((200, {"rows": []}), "did not answer a non-empty list"),
+            "404": ((404, {"detail": "Not Found"}), "may predate the worker registry routes"),
+            "not json": ((200, b"<html>"), "answered, but not with JSON"),
+            "not a list": ((200, {"rows": []}), "did not answer a"),
             "malformed": ((200, ["context7"]), "answered a malformed entry"),
             "timeout": ("hang", "could not be reached (TimeoutError: timed out)"),
         }
         loads = {
-            PROFILES: (profiles, "agent profiles"),
-            SERVERS: (mcp, "the MCP registry"),
+            PROFILES: (profiles, "agent profiles", {"empty": ((200, []), "a non-empty list")}),
+            SERVERS: (mcp, "the MCP registry", {}),
         }
         with mock.patch.object(profiles, "TIMEOUT_S", 0.2):
-            for route, (module, what) in loads.items():
-                for name, (answer, fragment) in cases.items():
+            for route, (module, what, extra) in loads.items():
+                for name, (answer, fragment) in (cases | extra).items():
                     with self.subTest(route=route, case=name):
                         self.worker.routes[route] = answer
                         sentence = self.refusal(module.load)
@@ -149,6 +155,13 @@ class Refused(Case):
                 rows = registry.ROWS if route == PROFILES else [CONTEXT7]
                 self.worker.routes[route] = (200, rows)
         self.assertEqual(self.console.seen, [])
+
+    def test_a_refusal_never_prints_userinfo_from_sazed_url(self):
+        with mock.patch.object(sazed_api, "SAZED_URL", "http://user:hunter2@127.0.0.1:1"):
+            sentence = self.refusal(profiles.load)
+        self.assertIn("Sazed at http://127.0.0.1:1 could not be reached", sentence)
+        self.assertNotIn("hunter2", sentence)
+        self.assertNotIn("user", sentence)
 
     def test_the_cli_refuses_to_start_when_a_registry_fetch_fails(self):
         self.worker.routes[SERVERS] = (401, {"detail": "bad worker key"})

@@ -48,7 +48,8 @@ def load(unattended: bool = False) -> tuple[dict[str, dict[str, Any]], str]:
     if unattended:
         # Never read or write the cache here: a root-owned cache would block the next hand run.
         path = "/worker/agents/mcp-servers"
-        _active = (profiles.fetch_unattended(path, "the MCP registry", _table), "sazed")
+        fetched = profiles.fetch_unattended(path, "the MCP registry", _table, may_be_empty=True)
+        _active = (fetched, "sazed")
         return _active
     base = os.environ.get("DISPATCH_SAZED_URL")
     path = cache_path()
