@@ -90,6 +90,7 @@ class UnattendedLaunch(unittest.TestCase):
 
         def record(spec, *args):
             specs.append(spec)
+            self.config_during_run = list(Path(spec.env_extra["CLAUDE_CONFIG_DIR"]).iterdir())
             return outcome
 
         with mock.patch.object(run_agent, "_run", side_effect=record):
@@ -128,7 +129,8 @@ class UnattendedLaunch(unittest.TestCase):
              "DISPATCH_ENGINE", "CLAUDE_CONFIG_DIR"},
         )  # fmt: skip
         self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(run_dir / "claude-config"))
-        self.assertEqual(list((run_dir / "claude-config").iterdir()), [])
+        self.assertEqual(self.config_during_run, [])
+        self.assertFalse((run_dir / "claude-config").exists())
         self.assertNotIn("worker-secret", env.values())
         self.assertEqual(user, as_agent())
         servers = json.loads((run_dir / "mcp.json").read_text())["mcpServers"]
@@ -159,6 +161,18 @@ class UnattendedLaunch(unittest.TestCase):
             "Read(./**),Grep(./**),Glob(./**),mcp__check__run_check",
         )
         self.assertIn(READ_ONLY_RULE, argv[-1])
+
+    def test_the_claude_config_folder_is_removed_when_the_run_fails(self):
+        task = Task(id="w", goal="g", done="d", owns=["src/**"])
+        plan = Plan(id="p1", tasks=[task], check="sh check.sh")
+        board = Board(self.home)
+        integrate.init(plan, self.ws, board, "main", {"unattended": True})
+        with (
+            mock.patch.object(run_agent, "_run", side_effect=OSError("launch failed")),
+            self.assertRaises(OSError),
+        ):
+            run_task(plan, task, self.ws, board, {"unattended": True})
+        self.assertFalse((self.home / "runs" / "w" / "claude-config").exists())
 
     def test_the_token_reaches_claude_and_only_claude(self):
         with mock.patch.object(claude, "CLAUDE_TOKEN", "sk-ant-pin"):

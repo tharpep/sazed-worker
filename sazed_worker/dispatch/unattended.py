@@ -14,7 +14,7 @@ from sazed_worker import config
 from sazed_worker.config import BWRAP
 from sazed_worker.dispatch import mcp, profiles
 from sazed_worker.dispatch.plan import Plan, Task, resolve
-from sazed_worker.dispatch.rules import edit_reason, glob_match
+from sazed_worker.dispatch.rules import edit_reason, folded, glob_match
 from sazed_worker.dispatch.workspace import GitError, Landing, Workspace, git
 from sazed_worker.jail import home_for, run_jailed
 
@@ -192,7 +192,7 @@ def _changed(d: Path, guard: tuple[str, ...]) -> list[str]:
 
 def _storable(root: Path, rel: str) -> bool:
     """A path git can take: deleted, a regular file or a symlink, under no symlinked folder."""
-    if rel.endswith("/") or ".git" in PurePosixPath(rel).parts:
+    if rel.endswith("/") or ".git" in {folded(p) for p in PurePosixPath(rel).parts}:
         return False
     parent = root
     for part in PurePosixPath(rel).parts[:-1]:
@@ -207,7 +207,7 @@ def _storable(root: Path, rel: str) -> bool:
 
 
 def _regen_may_write(rel: str) -> bool:
-    parts = PurePosixPath(rel).parts
+    parts = tuple(folded(p) for p in PurePosixPath(rel).parts)
     return parts[0] not in REGEN_NEVER_TOP and not set(parts) & set(REGEN_NEVER_ANYWHERE)
 
 
@@ -273,7 +273,8 @@ class UnattendedWorkspace(Workspace):
         """Make d writable by the agent, with .git and .claude left to root and a link folder
         rebuilt from the clone, so nothing an earlier jail wrote under node_modules survives."""
         (d / ".claude").mkdir(exist_ok=True)
-        (d / ".git").chmod(SHARED_FILE)
+        if stat.S_ISREG((d / ".git").lstat().st_mode):
+            (d / ".git").chmod(SHARED_FILE)
         farm = d / FARM
         if farm.is_symlink() or farm.is_file():
             farm.unlink()

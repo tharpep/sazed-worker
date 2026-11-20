@@ -283,6 +283,24 @@ class Contained(Case):
         self.assertIsNone(self.reason("Read", file_path="src/a.txt"))
         self.assertIsNone(self.reason("Grep", pattern="x"))
 
+    def test_a_glob_pattern_cannot_reach_outside(self):
+        stay = f"stay inside your worktree ({self.wt})"
+        relative = f"{stay}: use a relative glob pattern"
+        self.assertEqual(self.reason("Glob", pattern="/etc/**"), relative)
+        self.assertEqual(self.reason("Glob", pattern="~/.ssh/*"), relative)
+        self.assertEqual(self.reason("Glob", pattern="src/../../**"), relative)
+        self.assertEqual(self.reason("Glob", pattern="src/out/**"), stay)
+        self.assertIsNone(self.reason("Glob", pattern="src/**/*.py"))
+
+    def test_case_and_unicode_variants_of_protected_folders_are_refused(self):
+        for name in (".Claude", ".CLAUDE", ".Git", ".Ｃlaude"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    reason_for({"tool_name": "Edit", "tool_input": {"file_path": f"{name}/x"}},
+                               str(self.wt), ["**"], contained=True),
+                    f"agents do not edit {name}/",
+                )  # fmt: skip
+
     def test_hand_runs_keep_today_s_rules(self):
         self.assertIsNone(self.reason("Read", contained=False, file_path="/etc/hostname"))
         self.assertIsNone(self.reason("Write", contained=False, file_path="src/out/x.txt"))
@@ -446,7 +464,8 @@ class WrapperCommit(Case):
         with mock.patch.object(self.ws, "commit_owned", side_effect=boom):
             row = run_agent._finish(task, self.ws, self.board, outcome, spec, False, False, True)
         self.assertEqual((row["state"], row["line"], row["meta"]["reason"]),
-                         ("failed", "the wrapper could not commit: git add: fatal", "no_change"))
+                         ("failed", "the wrapper could not commit: git add: fatal",
+                          "wrapper_failed"))
 
     def test_a_planted_gitattributes_filter_never_runs_as_root(self):
         marker = self.tmp / "filter-ran"
@@ -460,6 +479,28 @@ class WrapperCommit(Case):
             committed, _ = self.ws.commit_owned(_plan().tasks[0], "s")
         self.assertIn("src/api/a.txt", committed)
         self.assertFalse(marker.exists())
+
+    def test_case_and_unicode_variants_of_protected_folders_are_strays(self):
+        names = (".Claude/settings.json", ".GITHUB/x.yml", ".Git/config", ".Ｃlaude/s.json")
+        for rel in names:
+            (self.wt / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.wt / rel).write_text("{}")
+        committed, discarded = self.ws.commit_owned(Task(id="api", goal="g", done="d",
+                                                         owns=["**"]), "s")
+        self.assertEqual(committed, [".GITHUB/x.yml"])
+        self.assertEqual(sorted(discarded), sorted(set(names) - {".GITHUB/x.yml"}))
+
+    def test_prepare_never_chmods_through_a_dot_git_symlink(self):
+        target = self.tmp / "target"
+        target.write_text("x")
+        target.chmod(0o600)
+        dot_git = self.ws.integ_dir / ".git"
+        saved = dot_git.read_text()
+        dot_git.unlink()
+        dot_git.symlink_to(target)
+        self.addCleanup(lambda: (dot_git.unlink(), dot_git.write_text(saved)))
+        self.ws._prepare(self.ws.integ_dir)
+        self.assertEqual(target.stat().st_mode & 0o777, 0o600)
 
     def test_the_integration_link_folder_is_rebuilt_from_the_clone(self):
         shared = self.repo / "node_modules" / "vitest"
@@ -541,25 +582,27 @@ class Jail(Case):
         self.assertIn("module.exports = 1", out)
         self.assertIn("shared-ro", out)
 
-    def regen_case(self, outputs: list[str]) -> tuple:
+    REGEN_ESCAPE = (
+        "import os\n"
+        "os.makedirs('.github/workflows', exist_ok=True)\n"
+        "open('.github/workflows/x.yml', 'w').write('on: push')\n"
+        "open('check.sh', 'w').write('exit 0')\n"
+        "os.makedirs('gen', exist_ok=True)\n"
+        "open('gen/out.txt', 'w').write('generated')\n"
+    )
+
+    def regen_case(self, outputs: list[str], body: str = REGEN_ESCAPE, check: str = "exit 1"):
         """The review's case: a task that owns regen's script makes regen write a workflow and
         turn the failing check into a passing one."""
         (self.repo / "scripts").mkdir()
         (self.repo / "scripts" / "gen.py").write_text("print('gen')\n")
-        (self.repo / "check.sh").write_text("exit 1\n")
+        (self.repo / "check.sh").write_text(f"{check}\n")
         git("add", "-A", cwd=self.repo)
         git("commit", "-qm", "regen seed", cwd=self.repo)
         git("reset", "-q", "--hard", "main", cwd=self.ws.integ_dir)
         ws = UnattendedWorkspace(self.repo, "p1", self.home, outputs)
         wt = ws.create("gen")
-        (wt / "scripts" / "gen.py").write_text(
-            "import os\n"
-            "os.makedirs('.github/workflows', exist_ok=True)\n"
-            "open('.github/workflows/x.yml', 'w').write('on: push')\n"
-            "open('check.sh', 'w').write('exit 0')\n"
-            "os.makedirs('gen', exist_ok=True)\n"
-            "open('gen/out.txt', 'w').write('generated')\n"
-        )
+        (wt / "scripts" / "gen.py").write_text(body)
         ws.commit_owned(Task(id="gen", goal="g", done="d", owns=["scripts/**"]), "edit gen")
         before = ws.tip()
         landing = ws.land("gen", "sh check.sh", "python3 scripts/gen.py", 60)
@@ -582,6 +625,22 @@ class Jail(Case):
             (landing.state, landing.line),
             ("failed", "regen changed paths outside regen_outputs: .github/workflows/x.yml"),
         )
+        self.assertEqual(ws.tip(), before)
+
+    def test_regen_refuses_case_variants_of_protected_folders(self):
+        body = (
+            "import os\n"
+            "for d in ('.Claude', '.GitHub/workflows'):\n"
+            "    os.makedirs(d, exist_ok=True)\n"
+            "open('.Claude/settings.json', 'w').write('{}')\n"
+            "open('.GitHub/workflows/x.yml', 'w').write('on: push')\n"
+        )
+        ws, before, landing = self.regen_case(["**"], body, check="true")
+        self.assertEqual(
+            (landing.state, landing.reason, landing.line),
+            ("failed", "regen_failed", "regen changed paths outside regen_outputs: "
+             ".Claude/settings.json, .GitHub/workflows/x.yml"),
+        )  # fmt: skip
         self.assertEqual(ws.tip(), before)
 
     def test_regen_commits_only_its_declared_outputs(self):

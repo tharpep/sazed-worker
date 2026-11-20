@@ -3,6 +3,7 @@
 import os
 import re
 import shlex
+import unicodedata
 from pathlib import PurePosixPath
 
 _SPLIT = re.compile(r"&&|\|\||;|\n|\|")
@@ -12,6 +13,12 @@ _PIPE_TO_SHELL = re.compile(r"\|\s*(sudo\s+)?(ba|z|da)?sh\b")
 _GIT_VALUE_FLAGS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
 _PROTECTED = (".claude", ".git", ".agents", ".gemini")
 _RC_FILES = {".bashrc", ".zshrc", ".profile", ".bash_profile", ".zprofile", ".inputrc"}
+_WILDCARDS = set("*?[{")
+
+
+def folded(name: str) -> str:
+    """A path part as a case-insensitive, normalising file system (Windows, macOS) sees it."""
+    return unicodedata.normalize("NFKC", name).casefold()
 
 
 def _words(segment: str) -> list[str]:
@@ -120,6 +127,19 @@ def contained_reason(path: str, worktree: str) -> str | None:
     return None
 
 
+def glob_reason(pattern: str, path: str, worktree: str) -> str | None:
+    """Why a Glob pattern is refused: absolute, escaping with .., or rooted outside."""
+    parts = PurePosixPath(os.path.expanduser(pattern)).parts
+    if pattern.startswith(("/", "~")) or ".." in parts:
+        return f"stay inside your worktree ({worktree}): use a relative glob pattern"
+    fixed = []
+    for part in parts:
+        if set(part) & _WILDCARDS:
+            break
+        fixed.append(part)
+    return contained_reason(os.path.join(path, *fixed), worktree)
+
+
 def edit_reason(path: str, owns: list[str], worktree: str) -> str | None:
     """Why an edit to this path is refused, or None when the task owns it."""
     root = PurePosixPath(os.path.normpath(worktree))
@@ -127,9 +147,9 @@ def edit_reason(path: str, owns: list[str], worktree: str) -> str | None:
     if target != root and root not in target.parents:
         return f"stay inside your worktree ({worktree})"
     rel = target.relative_to(root)
-    if rel.parts and rel.parts[0] in _PROTECTED:
+    if rel.parts and folded(rel.parts[0]) in _PROTECTED:
         return f"agents do not edit {rel.parts[0]}/"
-    if rel.name in _RC_FILES:
+    if folded(rel.name) in _RC_FILES:
         return "agents do not edit shell rc files"
     if not any(glob_match(rel.as_posix(), p) for p in owns):
         return (

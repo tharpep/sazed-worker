@@ -7,7 +7,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from sazed_worker.dispatch.rules import bash_reason, contained_reason, edit_reason  # noqa: E402
+from sazed_worker.dispatch.rules import (  # noqa: E402
+    bash_reason,
+    contained_reason,
+    edit_reason,
+    glob_reason,
+)
 
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 CONTAINED_TOOLS = ("Read", "Grep", "Glob", *EDIT_TOOLS)
@@ -31,6 +36,8 @@ def reason_for(
         if tool in CONTAINED_TOOLS:
             path = args.get("file_path") or args.get("path") or args.get("notebook_path") or "."
             reason = contained_reason(path, worktree)
+            if not reason and tool == "Glob" and args.get("pattern"):
+                reason = glob_reason(str(args["pattern"]), path, worktree)
             if reason:
                 return reason
     if "toolCall" in event:

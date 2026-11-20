@@ -4,6 +4,7 @@ import json
 import os
 import queue
 import shlex
+import shutil
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -276,27 +277,46 @@ def run_task(
         "DISPATCH_ENGINE": engine,
     }
     stderr_path = run_dir / "agent.stderr"
-    is_unattended = bool(config.get("unattended"))
-    if is_unattended:
+    if config.get("unattended"):
         if not isinstance(ws, unattended.UnattendedWorkspace):
             raise TypeError("an unattended run needs an UnattendedWorkspace")
-        settings_path = agent_settings.build_unattended(worktree, task.owns, run_dir, read_only)
-        mcp_config = ws.prepare_run(task.id, str(check), timeout_s, run_dir)
-        granted = mcp.Grant()
-        prompt = prompt_for(plan, task, read_only, check, unattended=True)
-        agent_env = task_env | {"CLAUDE_CONFIG_DIR": str(ws.claude_config(run_dir))}
-        spec = unattended_spec(
-            cfg, worktree, prompt, settings_path, mcp_config, read_only, agent_env, stderr_path
-        )
-    else:
-        settings_path = agent_settings.build(
-            worktree, task.owns, run_dir, timeout_s, engine=engine, read_only=read_only
-        )
-        granted = mcp.build(cfg.get("mcp") or {}, run_dir) if engine != "agy" else mcp.Grant()
-        prompt = prompt_for(plan, task, read_only, check)
-        spec = task_spec(
-            cfg, worktree, prompt, settings_path, read_only, granted, task_env, stderr_path
-        )
+        try:
+            settings_path = agent_settings.build_unattended(
+                worktree, task.owns, run_dir, read_only
+            )
+            mcp_config = ws.prepare_run(task.id, str(check), timeout_s, run_dir)
+            prompt = prompt_for(plan, task, read_only, check, unattended=True)
+            agent_env = task_env | {"CLAUDE_CONFIG_DIR": str(ws.claude_config(run_dir))}
+            spec = unattended_spec(
+                cfg, worktree, prompt, settings_path, mcp_config, read_only, agent_env, stderr_path
+            )
+            return _launch(task, ws, board, cfg, spec, run_dir, mcp.Grant(), read_only, True)
+        finally:
+            shutil.rmtree(ws.claude_config(run_dir), ignore_errors=True)
+    settings_path = agent_settings.build(
+        worktree, task.owns, run_dir, timeout_s, engine=engine, read_only=read_only
+    )
+    granted = mcp.build(cfg.get("mcp") or {}, run_dir) if engine != "agy" else mcp.Grant()
+    prompt = prompt_for(plan, task, read_only, check)
+    spec = task_spec(
+        cfg, worktree, prompt, settings_path, read_only, granted, task_env, stderr_path
+    )
+    return _launch(task, ws, board, cfg, spec, run_dir, granted, read_only, False)
+
+
+def _launch(
+    task: Task,
+    ws: Workspace,
+    board: Board,
+    cfg: dict[str, Any],
+    spec: RunSpec,
+    run_dir: Path,
+    granted: mcp.Grant,
+    read_only: bool,
+    unattended_run: bool,
+) -> dict[str, Any]:
+    """Write the running row, run the agent, and write the row it finished with."""
+    worktree = spec.cwd
     board.write(
         task.id,
         "running",
@@ -306,7 +326,7 @@ def run_task(
     )
     outcome = _run(spec, run_dir / "agent.jsonl", board.mirror, task.id)
     evidence_required = bool(cfg.get("evidence_required"))
-    return _finish(task, ws, board, outcome, spec, read_only, evidence_required, is_unattended)
+    return _finish(task, ws, board, outcome, spec, read_only, evidence_required, unattended_run)
 
 
 def _reads(event: dict[str, Any]) -> int:
@@ -492,7 +512,7 @@ def _finish(
         try:
             committed, discarded = ws.commit_owned(task, summary)
         except GitError as e:
-            return failed(f"the wrapper could not commit: {e}", "no_change")
+            return failed(f"the wrapper could not commit: {e}", "wrapper_failed")
         if not committed:
             line = f"changed nothing inside owns: {summary}"
             return board.write(
