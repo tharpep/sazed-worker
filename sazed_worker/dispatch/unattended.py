@@ -6,6 +6,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -13,8 +14,8 @@ from sazed_worker import config
 from sazed_worker.config import BWRAP
 from sazed_worker.dispatch import mcp, profiles
 from sazed_worker.dispatch.plan import Plan, Task, resolve
-from sazed_worker.dispatch.rules import edit_reason
-from sazed_worker.dispatch.workspace import GitError, Workspace, git
+from sazed_worker.dispatch.rules import edit_reason, glob_match
+from sazed_worker.dispatch.workspace import GitError, Landing, Workspace, git
 from sazed_worker.jail import home_for, run_jailed
 
 CHECK_TOOL = Path(__file__).resolve().parent / "check_tool.py"
@@ -23,11 +24,27 @@ CHECK_SERVER = "check"
 RUN_CHECK = f"mcp__{CHECK_SERVER}__run_check"
 SHELL = "/bin/sh"
 IDENTITY = ("sazed-dispatch", "dispatch@sazed.invalid")
+ROOT_GIT_ENV = {
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_AUTHOR_NAME": IDENTITY[0],
+    "GIT_AUTHOR_EMAIL": IDENTITY[1],
+    "GIT_COMMITTER_NAME": IDENTITY[0],
+    "GIT_COMMITTER_EMAIL": IDENTITY[1],
+}
 SUMMARY_MAX = 200
 PROBE_TIMEOUT_S = 30
 SHIELDED = (".git", ".claude")
+REGEN_NEVER_TOP = (".github",)
+REGEN_NEVER_ANYWHERE = (".git", ".claude", ".gitattributes", ".gitmodules")
 FARM = "node_modules"
 FROM = {"cache": "the cache", "none": "nowhere"}
+TRAVERSE_ONLY = 0o711
+ROOT_ONLY = 0o700
+PRIVATE_FILE = 0o600
+SHARED_FILE = 0o644
+CLAUDE_CONFIG = "claude-config"
+TRANSCRIPTS = ("agent.jsonl", "agent.stderr")
 
 
 class Refused(RuntimeError):
@@ -50,6 +67,8 @@ def plan_refusal(plan: Plan, config_: dict[str, Any]) -> str | None:
             "an unattended run needs the MCP registry fresh from Sazed, "
             f"and it came from {FROM.get(mcp_source, mcp_source)}"
         )
+    if plan.regen and not plan.regen_outputs:
+        return "the plan runs regen but names no regen_outputs, the only paths regen may commit"
     for task in plan.tasks:
         if resolve(task, config_).get("engine") == "agy":
             return (
@@ -84,6 +103,8 @@ def host_refusal(ws: Workspace) -> str | None:
         uid, gid = config.AGENT_UID, config.AGENT_GID
     except KeyError:
         return f"an unattended run needs the agent user {config.AGENT_USER}, and there is none"
+    if uid == 0:
+        return f"the agent user {config.AGENT_USER} is uid 0, and agents never run as root"
     gids = set(os.getgrouplist(config.AGENT_USER, gid))
     ws.home.mkdir(parents=True, exist_ok=True)
     for path in (ws.home, ws.repo, PACKAGE, Path(sys.executable)):
@@ -139,26 +160,75 @@ def _fresh(path: Path) -> Path:
     return path
 
 
+def _traverse_only(*dirs: Path) -> None:
+    """Dirs the agent passes through to a known path but cannot list."""
+    for d in dirs:
+        d.mkdir(parents=True, exist_ok=True)
+        d.chmod(TRAVERSE_ONLY)
+
+
+def _root_git_env() -> dict[str, str]:
+    """Root's git sees no system or global config, so only the repository's own config, which
+    the agent cannot write, can define a filter, a merge driver or a hook path."""
+    return dict(os.environ) | ROOT_GIT_ENV
+
+
 def _git_z(*args: str, cwd: Path, guard: tuple[str, ...]) -> list[str]:
-    proc = subprocess.run(["git", *guard, *args], cwd=cwd, capture_output=True)
+    proc = subprocess.run(
+        ["git", *guard, *args], cwd=cwd, capture_output=True, env=_root_git_env()
+    )
     if proc.returncode != 0:
         detail = proc.stderr.decode(errors="replace").strip()[:400]
         raise GitError(f"git {' '.join(args)}: {detail}")
     return [p for p in proc.stdout.decode(errors="surrogateescape").split("\0") if p]
 
 
-def _under_symlink(root: Path, rel: str) -> bool:
+def _changed(d: Path, guard: tuple[str, ...]) -> list[str]:
+    """Paths changed against HEAD or new and not ignored, relative to d."""
+    changed = _git_z("diff", "--name-only", "-z", "HEAD", cwd=d, guard=guard)
+    changed += _git_z("ls-files", "--others", "--exclude-standard", "-z", cwd=d, guard=guard)
+    return list(dict.fromkeys(changed))
+
+
+def _storable(root: Path, rel: str) -> bool:
+    """A path git can take: deleted, a regular file or a symlink, under no symlinked folder."""
+    if rel.endswith("/") or ".git" in PurePosixPath(rel).parts:
+        return False
     parent = root
     for part in PurePosixPath(rel).parts[:-1]:
         parent = parent / part
         if parent.is_symlink():
-            return True
-    return False
+            return False
+    try:
+        mode = (root / rel).lstat().st_mode
+    except FileNotFoundError:
+        return True
+    return stat.S_ISREG(mode) or stat.S_ISLNK(mode)
+
+
+def _regen_may_write(rel: str) -> bool:
+    parts = PurePosixPath(rel).parts
+    return parts[0] not in REGEN_NEVER_TOP and not set(parts) & set(REGEN_NEVER_ANYWHERE)
+
+
+def _commit(d: Path, guard: tuple[str, ...], paths: list[str], message: str) -> None:
+    env = _root_git_env()
+    git("--literal-pathspecs", "add", "--", *paths, cwd=d, guard=guard, env=env)
+    git(
+        "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", message,
+        cwd=d, guard=guard, env=env,
+    )  # fmt: skip
 
 
 class UnattendedWorkspace(Workspace):
     """A Workspace whose worktrees the agent user writes, whose checks run in the untrusted jail,
     and whose git calls in those worktrees never read their .git file, hooks or fsmonitor."""
+
+    def __init__(
+        self, repo: Path, plan_id: str, home: Path, regen_outputs: Sequence[str] = ()
+    ):
+        super().__init__(repo, plan_id, home)
+        self.regen_outputs = list(regen_outputs)
 
     def guard(self, d: Path) -> tuple[str, ...]:
         return (
@@ -169,6 +239,9 @@ class UnattendedWorkspace(Workspace):
             "-c",
             "core.fsmonitor=false",
         )
+
+    def git_env(self) -> dict[str, str]:
+        return _root_git_env()
 
     def _admin(self, d: Path) -> Path:
         """The worktree's git directory, found from the main repository, never from d/.git."""
@@ -186,27 +259,46 @@ class UnattendedWorkspace(Workspace):
         """Paths bound read-only in every jail that writes d."""
         return [self.repo, *(d / name for name in SHIELDED)]
 
+    def seal(self) -> None:
+        """Close the dispatch home to the agent: it may pass through, never list or read."""
+        _traverse_only(self.home.parent, self.home)
+        board = self.home / "board"
+        if board.is_dir():
+            board.chmod(ROOT_ONLY)
+        for cache in ("profiles.json", "mcp-servers.json"):
+            if (self.home.parent / cache).is_file():
+                (self.home.parent / cache).chmod(PRIVATE_FILE)
+
     def _prepare(self, d: Path) -> None:
-        """Make d writable by the agent, with .git and .claude left to root."""
+        """Make d writable by the agent, with .git and .claude left to root and a link folder
+        rebuilt from the clone, so nothing an earlier jail wrote under node_modules survives."""
         (d / ".claude").mkdir(exist_ok=True)
+        (d / ".git").chmod(SHARED_FILE)
         farm = d / FARM
+        if farm.is_symlink() or farm.is_file():
+            farm.unlink()
+        elif farm.exists():
+            shutil.rmtree(farm)
         shared = self.repo / FARM
-        if shared.is_dir() and not farm.exists() and not farm.is_symlink():
+        if shared.is_dir():
             farm.mkdir()
             for entry in shared.iterdir():
                 (farm / entry.name).symlink_to(entry)
         _give(d, SHIELDED)
 
     def create(self, task_id: str) -> Path:
+        home = self.home
+        _traverse_only(home, home / "wt", home / "runs", home / "scratch", home / "scratch" / "wt")
         path = super().create(task_id)
         self._prepare(path)
-        jail_home = home_for(self.home)
+        jail_home = home_for(home)
         jail_home.mkdir(exist_ok=True)
         _give(jail_home)
         _fresh(self.scratch(f"wt/{task_id}"))
         return path
 
     def run_code(self, command: str, cwd: Path, timeout_s: int = 1200) -> tuple[int, str]:
+        _traverse_only(self.home, self.home / "scratch")
         scratch = _fresh(self.scratch("integ"))
         self._prepare(cwd)
         code, out, err = run_jailed(
@@ -226,15 +318,42 @@ class UnattendedWorkspace(Workspace):
         """Nothing: agy never runs unattended, and root never follows a path the agent made."""
 
     def _scrub(self, d: Path) -> None:
-        git("reset", "-q", "--hard", "HEAD", cwd=d, guard=self.guard(d))
-        git("clean", "-ffdxq", "-e", f"/{FARM}", cwd=d, guard=self.guard(d))
+        guard, env = self.guard(d), self.git_env()
+        git("reset", "-q", "--hard", "HEAD", cwd=d, guard=guard, env=env)
+        git("clean", "-ffdxq", "-e", f"/{FARM}", cwd=d, guard=guard, env=env)
 
     def land(self, task_id: str, check: str, regen: str | None, timeout_s: int):
         self._scrub(self.integ_dir)
         return super().land(task_id, check, regen, timeout_s)
 
-    def check_tool(self, task_id: str, check: str, timeout_s: int, run_dir: Path) -> Path:
-        """Write the run_check server's spec and the MCP config naming it; return the config."""
+    def _commit_regen(self, task_id: str, before: str) -> Landing | None:
+        """Commit regen output inside regen_outputs only; anything else fails the landing."""
+        d = self.integ_dir
+        guard = self.guard(d)
+        changed = _changed(d, guard)
+        refused = [
+            rel
+            for rel in changed
+            if not (
+                _storable(d, rel)
+                and _regen_may_write(rel)
+                and any(glob_match(rel, g) for g in self.regen_outputs)
+            )
+        ]
+        if refused:
+            self._reset(before)
+            self._scrub(d)
+            line = f"regen changed paths outside regen_outputs: {', '.join(refused[:10])}"
+            return Landing("failed", line, reason="regen_failed")
+        if changed:
+            _commit(d, guard, changed, f"regen after {task_id}")
+        self._scrub(d)
+        return None
+
+    def prepare_run(self, task_id: str, check: str, timeout_s: int, run_dir: Path) -> Path:
+        """Write the run_check spec, the MCP config naming it, the agent's own Claude config
+        folder and private transcripts; return the MCP config."""
+        _traverse_only(run_dir)
         worktree = self.task_dir(task_id)
         scratch = self.scratch(f"wt/{task_id}")
         spec = {
@@ -256,39 +375,32 @@ class UnattendedWorkspace(Workspace):
         path = run_dir / "mcp.json"
         path.write_text(json.dumps({"mcpServers": {CHECK_SERVER: server}}, indent=2))
         for written in (spec_path, path):
-            written.chmod(0o644)
+            written.chmod(SHARED_FILE)
+        claude_config = self.claude_config(run_dir)
+        shutil.rmtree(claude_config, ignore_errors=True)
+        claude_config.mkdir()
+        _give(claude_config)
+        for name in TRANSCRIPTS:
+            os.close(os.open(run_dir / name, os.O_WRONLY | os.O_CREAT, PRIVATE_FILE))
+            (run_dir / name).chmod(PRIVATE_FILE)
         return path
+
+    def claude_config(self, run_dir: Path) -> Path:
+        return run_dir / CLAUDE_CONFIG
 
     def commit_owned(self, task: Task, summary: str) -> tuple[list[str], list[str]]:
         """Commit what changed inside the task's owns under the fixed identity, then discard the
         rest; return (committed, discarded) paths."""
         d = self.task_dir(task.id)
         guard = self.guard(d)
-        changed = _git_z("diff", "--name-only", "-z", "HEAD", cwd=d, guard=guard)
-        changed += _git_z("ls-files", "--others", "--exclude-standard", "-z", cwd=d, guard=guard)
-        owned, strays = [], []
-        for rel in dict.fromkeys(changed):
-            inside = (
-                not rel.endswith("/")
-                and ".git" not in PurePosixPath(rel).parts
-                and not _under_symlink(d, rel)
-                and edit_reason(rel, task.owns, str(d)) is None
-            )
-            (owned if inside else strays).append(rel)
-        if owned:
-            name, email = IDENTITY
-            identity = {
-                "GIT_AUTHOR_NAME": name,
-                "GIT_AUTHOR_EMAIL": email,
-                "GIT_COMMITTER_NAME": name,
-                "GIT_COMMITTER_EMAIL": email,
-            }
-            lines = summary.strip().splitlines() or ["done"]
-            message = f"{task.id}: {lines[0][:SUMMARY_MAX]}"
-            git("--literal-pathspecs", "add", "--", *owned, cwd=d, guard=guard)
-            git(
-                "-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "-m", message,
-                cwd=d, guard=guard, env=os.environ | identity,
-            )  # fmt: skip
-        self._scrub(d)
+        try:
+            owned, strays = [], []
+            for rel in _changed(d, guard):
+                inside = _storable(d, rel) and edit_reason(rel, task.owns, str(d)) is None
+                (owned if inside else strays).append(rel)
+            if owned:
+                lines = summary.strip().splitlines() or ["done"]
+                _commit(d, guard, owned, f"{task.id}: {lines[0][:SUMMARY_MAX]}")
+        finally:
+            self._scrub(d)
         return owned, strays

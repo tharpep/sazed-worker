@@ -39,6 +39,7 @@ class Plan:
     check: str | None = None
     interfaces: list[str] = field(default_factory=list)
     regen: str | None = None
+    regen_outputs: list[str] = field(default_factory=list)
     interface_files: dict[str, str] = field(default_factory=dict)
     project: str | None = None
     board_plan: str | None = None
@@ -64,6 +65,7 @@ def load(path: Path) -> Plan:
         check=data.get("check"),
         interfaces=list(dict.fromkeys([*data.get("interfaces", []), *files])),
         regen=data.get("regen"),
+        regen_outputs=list(data.get("regen_outputs", [])),
         interface_files=files,
         project=data.get("project"),
         board_plan=data.get("board_plan"),

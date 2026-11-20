@@ -79,12 +79,16 @@ def _context(args: argparse.Namespace):
     repo = Path(args.repo).resolve()
     if not config["unattended"]:
         ws = Workspace(repo, loaded.id, home)
-    else:
-        os.umask(SHARED_UMASK)
-        ws = unattended.UnattendedWorkspace(repo, loaded.id, home)
-        if args.command in LAUNCHES:
-            unattended.preflight(loaded, config, ws)
-    return loaded, config, ws, Board(home, Mirror.from_env(loaded.id))
+        return loaded, config, ws, Board(home, Mirror.from_env(loaded.id))
+    ws = unattended.UnattendedWorkspace(repo, loaded.id, home, loaded.regen_outputs)
+    if args.command not in LAUNCHES:
+        return loaded, config, ws, Board(home, Mirror.from_env(loaded.id))
+    unattended.preflight(loaded, config, ws)
+    os.umask(SHARED_UMASK)
+    os.environ.update(unattended.ROOT_GIT_ENV)
+    board = Board(home, Mirror.from_env(loaded.id))
+    ws.seal()
+    return loaded, config, ws, board
 
 
 def _print_board(plan: plans.Plan, board: Board) -> None:

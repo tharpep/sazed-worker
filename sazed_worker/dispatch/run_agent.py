@@ -17,7 +17,7 @@ from sazed_worker.dispatch.board import RED, Board
 from sazed_worker.dispatch.mirror import Mirror
 from sazed_worker.dispatch.plan import Plan, Task, could_overlap, resolve
 from sazed_worker.dispatch.steps import StepSender
-from sazed_worker.dispatch.workspace import Workspace
+from sazed_worker.dispatch.workspace import GitError, Workspace
 from sazed_worker.run import Run
 
 STATE_SCHEMA = {
@@ -43,7 +43,8 @@ EVIDENCE_TOOLS = (
 READ_ONLY_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "Bash")
 UNATTENDED_READ_TOOLS = ("Read", "Grep", "Glob")
 UNATTENDED_TOOLS = (*UNATTENDED_READ_TOOLS, "Edit", "Write")
-UNATTENDED_ALLOWED = (*UNATTENDED_READ_TOOLS, "Edit(./**)", "Write(./**)")
+UNATTENDED_READ_ALLOWED = ("Read(./**)", "Grep(./**)", "Glob(./**)")
+UNATTENDED_ALLOWED = (*UNATTENDED_READ_ALLOWED, "Edit(./**)", "Write(./**)")
 STOPPED = {
     "budget": ("went over its budget", "budget"),
     "refusal": ("the model refused to continue", "refused"),
@@ -225,7 +226,7 @@ def unattended_spec(
         raise ValueError("an unattended run launches only claude")
     effort = cfg.get("effort")
     tools = UNATTENDED_READ_TOOLS if read_only else UNATTENDED_TOOLS
-    allowed = UNATTENDED_READ_TOOLS if read_only else UNATTENDED_ALLOWED
+    allowed = UNATTENDED_READ_ALLOWED if read_only else UNATTENDED_ALLOWED
     return RunSpec(
         engine="claude",
         binary=_claude(),
@@ -244,7 +245,7 @@ def unattended_spec(
         harness_stops=True,
         permission_mode="dontAsk",
         settings=settings_path,
-        setting_sources="project",
+        setting_sources="user",
         budget_usd=cfg.get("budget_usd"),
         tools=",".join(tools),
         denied_tools=tuple(claude.SECRET_READS),
@@ -280,11 +281,12 @@ def run_task(
         if not isinstance(ws, unattended.UnattendedWorkspace):
             raise TypeError("an unattended run needs an UnattendedWorkspace")
         settings_path = agent_settings.build_unattended(worktree, task.owns, run_dir, read_only)
-        mcp_config = ws.check_tool(task.id, str(check), timeout_s, run_dir)
+        mcp_config = ws.prepare_run(task.id, str(check), timeout_s, run_dir)
         granted = mcp.Grant()
         prompt = prompt_for(plan, task, read_only, check, unattended=True)
+        agent_env = task_env | {"CLAUDE_CONFIG_DIR": str(ws.claude_config(run_dir))}
         spec = unattended_spec(
-            cfg, worktree, prompt, settings_path, mcp_config, read_only, task_env, stderr_path
+            cfg, worktree, prompt, settings_path, mcp_config, read_only, agent_env, stderr_path
         )
     else:
         settings_path = agent_settings.build(
@@ -487,7 +489,10 @@ def _finish(
     summary = structured.get("summary") or "done"
     if not read_only and unattended_run:
         assert isinstance(ws, unattended.UnattendedWorkspace)
-        committed, discarded = ws.commit_owned(task, summary)
+        try:
+            committed, discarded = ws.commit_owned(task, summary)
+        except GitError as e:
+            return failed(f"the wrapper could not commit: {e}", "no_change")
         if not committed:
             line = f"changed nothing inside owns: {summary}"
             return board.write(

@@ -93,15 +93,14 @@ def build_unattended(worktree: Path, owns: list[str], run_dir: Path, read_only: 
     owns_file.write_text(json.dumps(owns))
     ro = " --read-only" if read_only else ""
     command = (
-        f'"{sys.executable}" -I "{HOOK}" --worktree "{worktree}" --owns-file "{owns_file}"{ro}'
+        f'"{sys.executable}" -I "{HOOK}" --worktree "{worktree}" --owns-file "{owns_file}"'
+        f"{ro} --contained"
     )
+    hook = [{"type": "command", "command": command}]
     settings = {
         "permissions": {"deny": [rule for rule in DENY if not rule.startswith("Bash(")]},
-        "hooks": {
-            "PreToolUse": [
-                {"matcher": "Edit|Write", "hooks": [{"type": "command", "command": command}]}
-            ]
-        },
+        "disableAllHooks": False,
+        "hooks": {"PreToolUse": [{"matcher": "Read|Grep|Glob|Edit|Write", "hooks": hook}]},
         "env": {"CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"},
     }
     path = run_dir / "agent-settings.json"

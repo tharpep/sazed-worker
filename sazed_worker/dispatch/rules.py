@@ -111,6 +111,15 @@ def glob_match(path: str, pattern: str) -> bool:
     return re.fullmatch("".join(out), path) is not None
 
 
+def contained_reason(path: str, worktree: str) -> str | None:
+    """Why a path is refused when, with every symlink followed, it leaves the worktree."""
+    root = os.path.realpath(worktree)
+    target = os.path.realpath(os.path.join(worktree, os.path.expanduser(path)))
+    if target != root and not target.startswith(root + os.sep):
+        return f"stay inside your worktree ({worktree})"
+    return None
+
+
 def edit_reason(path: str, owns: list[str], worktree: str) -> str | None:
     """Why an edit to this path is refused, or None when the task owns it."""
     root = PurePosixPath(os.path.normpath(worktree))

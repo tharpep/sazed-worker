@@ -7,9 +7,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from sazed_worker.dispatch.rules import bash_reason, edit_reason  # noqa: E402
+from sazed_worker.dispatch.rules import bash_reason, contained_reason, edit_reason  # noqa: E402
 
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+CONTAINED_TOOLS = ("Read", "Grep", "Glob", *EDIT_TOOLS)
 AGY_EDIT_TOOLS = (
     "write_file",
     "edit_file",
@@ -22,8 +23,16 @@ AGY_EDIT_TOOLS = (
 
 
 def reason_for(
-    event: dict, worktree: str, owns: list[str], read_only: bool = False
+    event: dict, worktree: str, owns: list[str], read_only: bool = False, contained: bool = False
 ) -> str | None:
+    if contained and "tool_name" in event:
+        tool = event.get("tool_name", "")
+        args = event.get("tool_input") or {}
+        if tool in CONTAINED_TOOLS:
+            path = args.get("file_path") or args.get("path") or args.get("notebook_path") or "."
+            reason = contained_reason(path, worktree)
+            if reason:
+                return reason
     if "toolCall" in event:
         call = event.get("toolCall") or {}
         tool = call.get("name", "")
@@ -59,13 +68,16 @@ def main() -> None:
     parser.add_argument("--worktree", required=True)
     parser.add_argument("--owns-file", required=True)
     parser.add_argument("--read-only", action="store_true")
+    parser.add_argument("--contained", action="store_true")
     args = parser.parse_args()
     owns = json.loads(Path(args.owns_file).read_text())
     try:
         event = json.load(sys.stdin)
     except ValueError:
         return
-    reason = reason_for(event, args.worktree, owns, read_only=args.read_only)
+    reason = reason_for(
+        event, args.worktree, owns, read_only=args.read_only, contained=args.contained
+    )
     is_agy = "toolCall" in event
     if reason:
         if is_agy:

@@ -110,14 +110,14 @@ class UnattendedLaunch(unittest.TestCase):
                 "claude", "-p", "--output-format", "stream-json", "--verbose",
                 "--model", "sonnet", "--effort", "high",
                 "--settings", str(run_dir / "agent-settings.json"),
-                "--setting-sources", "project", "--strict-mcp-config",
+                "--setting-sources", "user", "--strict-mcp-config",
                 "--permission-mode", "dontAsk",
                 "--tools", "Read,Grep,Glob,Edit,Write",
                 "--max-budget-usd", "2.0", "--json-schema", SCHEMA,
                 "--disallowedTools", SECRET_READS,
                 "--mcp-config", str(run_dir / "mcp.json"),
                 "--allowedTools",
-                "Read,Grep,Glob,Edit(./**),Write(./**),mcp__check__run_check",
+                "Read(./**),Grep(./**),Glob(./**),Edit(./**),Write(./**),mcp__check__run_check",
                 "--", WRITABLE_PROMPT,
             ],
         )  # fmt: skip
@@ -125,8 +125,10 @@ class UnattendedLaunch(unittest.TestCase):
             set(env),
             {"HOME", "USER", "PATH", "LANG", "GIT_TERMINAL_PROMPT", "CLAUDE_CODE_OAUTH_TOKEN",
              "DISABLE_AUTOUPDATER", "DISPATCH_TASK", "DISPATCH_OWNS", "DISPATCH_WORKTREE",
-             "DISPATCH_ENGINE"},
+             "DISPATCH_ENGINE", "CLAUDE_CONFIG_DIR"},
         )  # fmt: skip
+        self.assertEqual(env["CLAUDE_CONFIG_DIR"], str(run_dir / "claude-config"))
+        self.assertEqual(list((run_dir / "claude-config").iterdir()), [])
         self.assertNotIn("worker-secret", env.values())
         self.assertEqual(user, as_agent())
         servers = json.loads((run_dir / "mcp.json").read_text())["mcpServers"]
@@ -140,13 +142,21 @@ class UnattendedLaunch(unittest.TestCase):
         self.assertEqual((check["check"], check["timeout_s"]), ("sh check.sh", 1200))
         settings = json.loads((run_dir / "agent-settings.json").read_text())
         self.assertNotIn("Bash", json.dumps(settings))
-        self.assertEqual([h["matcher"] for h in settings["hooks"]["PreToolUse"]], ["Edit|Write"])
+        self.assertEqual(
+            [h["matcher"] for h in settings["hooks"]["PreToolUse"]], ["Read|Grep|Glob|Edit|Write"]
+        )
+        self.assertIs(settings["disableAllHooks"], False)
+        hook = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertTrue(hook.endswith(" --contained"))
+        for name in ("agent.jsonl", "agent.stderr"):
+            self.assertEqual((run_dir / name).stat().st_mode & 0o777, 0o600)
 
     def test_a_read_only_task_has_the_read_tools_and_run_check_only(self):
         argv, _, _, plan = self.launch(Task(id="r", goal="g", done="d", profile="sweep"))
         self.assertEqual(argv[argv.index("--tools") + 1], "Read,Grep,Glob")
         self.assertEqual(
-            argv[argv.index("--allowedTools") + 1], "Read,Grep,Glob,mcp__check__run_check"
+            argv[argv.index("--allowedTools") + 1],
+            "Read(./**),Grep(./**),Glob(./**),mcp__check__run_check",
         )
         self.assertIn(READ_ONLY_RULE, argv[-1])
 
