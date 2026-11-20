@@ -13,6 +13,7 @@ REASONS = frozenset(
         "no_done_state",
         "no_evidence",
         "no_change",
+        "wrapper_failed",
         "left_owns",
         "check_failed",
         "regen_failed",

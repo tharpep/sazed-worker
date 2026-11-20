@@ -115,7 +115,8 @@ class Finish(unittest.TestCase):
         self.assertEqual((row["line"], row["meta"]["reason"]), ("no evidence read", "no_evidence"))
 
     def test_the_list_holds_the_worker_codes_and_not_the_reapers(self):
-        self.assertEqual(len(REASONS), 18)
+        self.assertEqual(len(REASONS), 19)
+        self.assertIn("wrapper_failed", REASONS)
         self.assertNotIn("no_heartbeat", REASONS)
 
 

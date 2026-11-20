@@ -3,6 +3,7 @@
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,8 +12,14 @@ class GitError(RuntimeError):
     pass
 
 
-def git(*args: str, cwd: Path, check: bool = True) -> str:
-    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+def git(
+    *args: str,
+    cwd: Path,
+    check: bool = True,
+    guard: tuple[str, ...] = (),
+    env: Mapping[str, str] | None = None,
+) -> str:
+    proc = subprocess.run(["git", *guard, *args], cwd=cwd, capture_output=True, text=True, env=env)
     if check and proc.returncode != 0:
         raise GitError(f"git {' '.join(args)}: {(proc.stderr or proc.stdout).strip()[:400]}")
     return proc.stdout.strip()
@@ -26,11 +33,6 @@ def run_code(command: str, cwd: Path, timeout_s: int = 1200) -> tuple[int, str]:
     except subprocess.TimeoutExpired:
         return -1, f"timed out after {timeout_s} s"
     return proc.returncode, (proc.stdout + proc.stderr)[-1500:]
-
-
-def run_shell(command: str, cwd: Path, timeout_s: int = 1200) -> tuple[bool, str]:
-    code, out = run_code(command, cwd, timeout_s)
-    return code == 0, out
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,17 @@ class Workspace:
         self.home = home
         self.integ_branch = f"integ/{plan_id}"
         self.integ_dir = home / "integ"
+
+    def guard(self, d: Path) -> tuple[str, ...]:
+        """Options before every git call made in the worktree d."""
+        return ()
+
+    def git_env(self) -> Mapping[str, str] | None:
+        """The environment of every git call made in a worktree; None inherits dispatch's."""
+        return None
+
+    def run_code(self, command: str, cwd: Path, timeout_s: int = 1200) -> tuple[int, str]:
+        return run_code(command, cwd, timeout_s)
 
     def task_branch(self, task_id: str) -> str:
         return f"dispatch/{self.plan_id}/{task_id}"
@@ -71,10 +84,11 @@ class Workspace:
         return git("rev-parse", self.integ_branch, cwd=self.repo)
 
     def commit_all(self, message: str, paths: list[str]) -> bool:
-        git("add", "--", *paths, cwd=self.integ_dir)
-        if not git("diff", "--cached", "--name-only", cwd=self.integ_dir):
+        guard, env = self.guard(self.integ_dir), self.git_env()
+        git("add", "--", *paths, cwd=self.integ_dir, guard=guard, env=env)
+        if not git("diff", "--cached", "--name-only", cwd=self.integ_dir, guard=guard, env=env):
             return False
-        git("commit", "-q", "-m", message, cwd=self.integ_dir)
+        git("commit", "-q", "-m", message, cwd=self.integ_dir, guard=guard, env=env)
         return True
 
     def create(self, task_id: str) -> Path:
@@ -115,28 +129,41 @@ class Workspace:
         before = self.tip()
         task_dir = self.task_dir(task_id)
         self._cleanup_hooks(task_dir)
+        task_guard, integ, env = self.guard(task_dir), self.guard(self.integ_dir), self.git_env()
         rebase = subprocess.run(
-            ["git", "rebase", "-q", self.integ_branch], cwd=task_dir, capture_output=True, text=True
+            ["git", *task_guard, "rebase", "-q", self.integ_branch],
+            cwd=task_dir,
+            capture_output=True,
+            text=True,
+            env=env,
         )
         if rebase.returncode != 0:
-            git("rebase", "--abort", cwd=task_dir, check=False)
+            git("rebase", "--abort", cwd=task_dir, check=False, guard=task_guard, env=env)
             line = f"rebase onto {self.integ_branch} conflicted"
             return Landing("conflict", line, reason="conflict")
-        git("merge", "-q", "--ff-only", self.task_branch(task_id), cwd=self.integ_dir)
+        branch = self.task_branch(task_id)
+        git("merge", "-q", "--ff-only", branch, cwd=self.integ_dir, guard=integ, env=env)
         if regen:
-            ok, out = run_shell(regen, self.integ_dir, timeout_s)
-            if not ok:
+            code, out = self.run_code(regen, self.integ_dir, timeout_s)
+            if code != 0:
                 self._reset(before)
                 return Landing("failed", f"regen failed: {out[-300:]}", reason="regen_failed")
-            git("add", "-A", cwd=self.integ_dir)
-            if git("diff", "--cached", "--name-only", cwd=self.integ_dir):
-                git("commit", "-q", "-m", f"regen after {task_id}", cwd=self.integ_dir)
-        ok, out = run_shell(check, self.integ_dir, timeout_s)
-        if not ok:
+            refused = self._commit_regen(task_id, before)
+            if refused:
+                return refused
+        code, out = self.run_code(check, self.integ_dir, timeout_s)
+        if code != 0:
             self._reset(before)
             line = f"check failed after landing: {out[-300:]}"
             return Landing("failed", line, reason="check_failed")
         return Landing("landed", f"landed on {self.integ_branch}", self.tip())
+
+    def _commit_regen(self, task_id: str, before: str) -> Landing | None:
+        """Commit what regen changed; a Landing only when the regen output is refused."""
+        git("add", "-A", cwd=self.integ_dir)
+        if git("diff", "--cached", "--name-only", cwd=self.integ_dir):
+            git("commit", "-q", "-m", f"regen after {task_id}", cwd=self.integ_dir)
+        return None
 
     def _cleanup_hooks(self, task_dir: Path) -> None:
         hook_file = task_dir / ".agents" / "hooks.json"
@@ -149,7 +176,8 @@ class Workspace:
                 pass
 
     def _reset(self, sha: str) -> None:
-        git("reset", "-q", "--hard", sha, cwd=self.integ_dir)
+        guard = self.guard(self.integ_dir)
+        git("reset", "-q", "--hard", sha, cwd=self.integ_dir, guard=guard, env=self.git_env())
 
     def export(self, remote: str = "origin") -> str:
         git("push", "-q", "-u", remote, self.integ_branch, cwd=self.integ_dir)

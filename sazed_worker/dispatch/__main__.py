@@ -2,10 +2,11 @@
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-from sazed_worker.dispatch import integrate, mcp, pr_export, profiles
+from sazed_worker.dispatch import integrate, mcp, pr_export, profiles, unattended
 from sazed_worker.dispatch import plan as plans
 from sazed_worker.dispatch.board import Board
 from sazed_worker.dispatch.mirror import Mirror
@@ -31,6 +32,8 @@ def _profiles(args: argparse.Namespace) -> int:
 
 
 NO_PROFILES = ("board", "clean")
+LAUNCHES = ("init", "run", "land", "go")
+SHARED_UMASK = 0o022
 
 
 def _load(args: argparse.Namespace, resolves: bool = True) -> tuple[plans.Plan, dict]:
@@ -73,8 +76,19 @@ def _context(args: argparse.Namespace):
     if problems:
         raise plans.PlanError("the plan doesn't validate:\n" + "\n".join(problems))
     home = default_home(loaded.id)
-    ws = Workspace(Path(args.repo).resolve(), loaded.id, home)
-    return loaded, config, ws, Board(home, Mirror.from_env(loaded.id))
+    repo = Path(args.repo).resolve()
+    if not config["unattended"]:
+        ws = Workspace(repo, loaded.id, home)
+        return loaded, config, ws, Board(home, Mirror.from_env(loaded.id))
+    ws = unattended.UnattendedWorkspace(repo, loaded.id, home, loaded.regen_outputs)
+    if args.command not in LAUNCHES:
+        return loaded, config, ws, Board(home, Mirror.from_env(loaded.id))
+    unattended.preflight(loaded, config, ws)
+    os.umask(SHARED_UMASK)
+    os.environ.update(unattended.ROOT_GIT_ENV)
+    board = Board(home, Mirror.from_env(loaded.id))
+    ws.seal()
+    return loaded, config, ws, board
 
 
 def _print_board(plan: plans.Plan, board: Board) -> None:
@@ -131,7 +145,7 @@ def _act(args: argparse.Namespace) -> int:
                     board.mirror.row(row)
         elif args.command == "clean":
             integrate.clean(plan, ws, board)
-    except pr_export.ExportRefused as e:
+    except (pr_export.ExportRefused, unattended.Refused) as e:
         print(f"refused: {e} (reason: {e.reason})")
         return 1
     except pr_export.ExportUnclear as e:
@@ -160,7 +174,8 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument(
             "--unattended",
             action="store_true",
-            help="run as the worker does: export sends the PR to Sazed and never pushes",
+            help="run as the worker does: agents have no shell and run as the agent user, "
+            "checks run in the jail, and export sends the PR to Sazed and never pushes",
         )
         p.set_defaults(func=func)
         if func is _act:
