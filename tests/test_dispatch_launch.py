@@ -98,6 +98,12 @@ class DispatchLaunch(unittest.TestCase):
         """S2-10: over the cap the agent is stopped and the row says it hit the tool cap."""
         row = self.run_one({"max_tool_calls": 2})
         self.assertEqual((row["state"], row["line"]), ("failed", "hit the tool cap of 2 calls"))
+        self.assertEqual(row["meta"]["reason"], "tool_cap")
+
+    def test_the_structured_answer_does_not_reach_the_cap(self):
+        """S3-4: five Greps and the StructuredOutput answer finish under a cap of six."""
+        row = self.run_one({"max_tool_calls": 6})
+        self.assertEqual((row["state"], row["line"]), ("done", "t tools"))
 
     def test_a_null_tool_cap_changes_nothing(self):
         row = self.run_one({"max_tool_calls": None})

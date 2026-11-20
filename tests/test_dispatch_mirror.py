@@ -122,7 +122,7 @@ class Mirroring(unittest.TestCase):
         board = self.board(None)
         board.write("a", "running", "go")
         board.write("a", "done", "ok")
-        board.write("b", "blocked", "waiting on a")
+        board.write("b", "blocked", "waiting on a", reason="dependency_pending")
         plan_file = self.tmp / "plan.json"
         plan_file.write_text(
             json.dumps(

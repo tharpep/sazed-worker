@@ -110,6 +110,13 @@ def main() -> None:
             flush=True,
         )
     else:
+        answer = {
+            "type": "tool_use",
+            "id": "toolu_answer",
+            "name": "StructuredOutput",
+            "input": {"state": state, "summary": f"{task} {mode}"} | extra,
+        }
+        print(json.dumps({"type": "assistant", "message": {"content": [answer]}}), flush=True)
         print(
             json.dumps(
                 {

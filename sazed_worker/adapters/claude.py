@@ -31,6 +31,7 @@ TOOL_POLICY = "allowlist"  # --tools and --allowedTools per profile; dontAsk ref
 # --setting-sources=user: Claude Code loads none of the checkout's CLAUDE.md or AGENTS.md here.
 READS_CONTEXT: tuple[str, ...] = ()
 PERMISSION_MODES = frozenset({"dontAsk", "acceptEdits"})
+STRUCTURED_ANSWER = "StructuredOutput"  # pinned by test_the_structured_answer_is_not_capped
 
 
 def available() -> bool:
@@ -154,6 +155,8 @@ def handle_event(run: "Run", event: dict[str, Any]) -> None:
         for block in content if isinstance(content, list) else []:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 name = str(block.get("name") or "?")
+                if name == STRUCTURED_ANSWER:
+                    continue
                 call_id = block.get("id") if isinstance(block.get("id"), str) else None
                 run.emit(ToolCall(call_id, name, tool_kind(name), "pending"))
     if event.get("type") == "result" and event.get("api_error") == "usage_limit_reached":

@@ -80,6 +80,9 @@ class Engine(unittest.TestCase):
     def modes(self, **modes):
         os.environ["DISPATCH_FAKE_MODES"] = json.dumps(modes)
 
+    def reason(self, task: str) -> str | None:
+        return self.board.rows(task)[-1]["meta"].get("reason")
+
     def integ_files(self) -> set[str]:
         out = git("ls-tree", "-r", "--name-only", "integ/p1", cwd=self.repo)
         return set(out.splitlines())
@@ -100,6 +103,7 @@ class Engine(unittest.TestCase):
         states = integrate.go(_plan(), self.ws, self.board, "main")
         self.assertEqual(states["api"], "failed")
         self.assertIn("left its owns: README.md", self.board.rows("api")[-1]["line"])
+        self.assertEqual(self.reason("api"), "left_owns")
         self.assertEqual(states["ui"], "not started")
         self.assertNotIn("README.md strayed", (self.ws.integ_dir / "README.md").read_text())
 
@@ -108,6 +112,7 @@ class Engine(unittest.TestCase):
         integrate.go(_plan(), self.ws, self.board, "main")
         self.assertEqual(self.board.state("docs"), "failed")
         self.assertIn("check failed", self.board.rows("docs")[-1]["line"])
+        self.assertEqual(self.reason("docs"), "check_failed")
         self.assertNotIn("docs/docs.txt", self.integ_files())
         self.assertEqual(self.board.state("api"), "landed")
 
@@ -115,6 +120,39 @@ class Engine(unittest.TestCase):
         self.modes(docs="nocommit")
         integrate.go(_plan(), self.ws, self.board, "main")
         self.assertIn("made no commits", self.board.rows("docs")[-1]["line"])
+        self.assertEqual(self.reason("docs"), "no_change")
+
+    def test_a_failing_regen_is_its_own_reason(self):
+        plan = _plan()
+        object.__setattr__(plan, "regen", "false")
+        integrate.go(plan, self.ws, self.board, "main")
+        self.assertEqual(self.board.rows("api")[-1]["line"], "regen failed: ")
+        self.assertEqual(self.reason("api"), "regen_failed")
+
+    def test_a_rebase_conflict_is_a_conflict_row_with_its_reason(self):
+        plan = _plan()
+        integrate.init(plan, self.ws, self.board, "main")
+        run_task(plan, plan.tasks[0], self.ws, self.board)
+        (self.ws.integ_dir / "src" / "api").mkdir(parents=True)
+        (self.ws.integ_dir / "src" / "api" / "api.txt").write_text("someone else\n")
+        self.ws.commit_all("collide", ["src/api/api.txt"])
+        row = integrate.land(plan, self.ws, self.board)[0]
+        self.assertEqual(
+            (row["state"], row["line"], row["meta"]["reason"]),
+            ("conflict", "rebase onto integ/p1 conflicted", "conflict"),
+        )
+
+    def test_overlapping_paths_block_with_their_reason(self):
+        wide = Task(id="wide", goal="g", done="d", owns=["src/**"])
+        narrow = Task(id="narrow", goal="g", done="d", owns=["src/api/**"])
+        plan = Plan(id="p1", tasks=[wide, narrow], check=CHECK)
+        integrate.init(plan, self.ws, self.board, "main")
+        self.board.write("wide", "running", "pretend")
+        row = run_task(plan, narrow, self.ws, self.board)
+        self.assertEqual(
+            (row["state"], row["line"], row["meta"]["reason"]),
+            ("blocked", "its paths overlap wide, which is running", "overlap"),
+        )
 
     def test_flash_task_runs_with_agy_and_lands_clean(self):
         """Proves a task with the flash profile runs under agy, commits, and lands."""
@@ -143,14 +181,46 @@ class Engine(unittest.TestCase):
         plan = _plan(docs={"timeout_s": 2})
         integrate.init(plan, self.ws, self.board, "main")
         row = run_task(plan, plan.tasks[2], self.ws, self.board)
-        self.assertEqual(row["state"], "failed")
-        self.assertIn("timed out after 2 s", row["line"])
+        self.assertEqual(
+            (row["state"], row["line"], row["meta"]["reason"]),
+            ("timed_out", "timed out after 2 s", "timeout"),
+        )
+
+    def test_a_timed_out_task_is_treated_as_a_failed_one(self):
+        """S3-3: its dependant is blocked as on a failed dependency, landing and go leave it,
+        export refuses the plan, clean removes it, and the board prints it."""
+        self.modes(api="hang")
+        plan = _plan(api={"timeout_s": 2})
+        states = integrate.go(plan, self.ws, self.board, "main")
+        self.assertEqual(states, {"api": "timed_out", "ui": "not started", "docs": "landed"})
+        row = run_task(plan, plan.tasks[1], self.ws, self.board)
+        self.assertEqual(
+            (row["state"], row["line"], row["meta"]["reason"]),
+            ("blocked", "waiting on api to land", "dependency_failed"),
+        )
+        self.assertEqual(integrate.land(plan, self.ws, self.board), [])
+        rows = len(self.board.rows("api"))
+        again = integrate.go(plan, self.ws, self.board, "main")
+        self.assertEqual((again["api"], len(self.board.rows("api"))), ("timed_out", rows))
+        with self.assertRaisesRegex(integrate.IntegrateError, "api, ui"):
+            integrate.export(plan, self.ws, self.board, "main", "t", "b")
+        out = io.StringIO()
+        plan_file = self.tmp / "plan.json"
+        plan_file.write_text(json.dumps({"id": "p1", "check": CHECK, "tasks": [
+            {"id": "api", "goal": "g", "done": "d", "owns": ["src/api/**"]}]}))
+        with redirect_stdout(out):
+            self.assertEqual(main(["board", str(plan_file), "--repo", str(self.repo)]), 0)
+        self.assertRegex(out.getvalue(), r"api\s+timed_out timed out after 2 s")
+        integrate.clean(plan, self.ws, self.board)
+        self.assertEqual(self.board.rows("api")[-1]["state"], "cleaned")
+        self.assertFalse(self.ws.task_dir("api").exists())
 
     def test_a_task_waits_for_its_dependency_to_land(self):
         plan = _plan()
         integrate.init(plan, self.ws, self.board, "main")
         row = run_task(plan, plan.tasks[1], self.ws, self.board)
         self.assertEqual((row["state"], row["line"]), ("blocked", "waiting on api to land"))
+        self.assertEqual(row["meta"]["reason"], "dependency_pending")
 
     def test_export_pushes_integ_and_opens_one_draft_pr(self):
         remote = self.tmp / "remote.git"
