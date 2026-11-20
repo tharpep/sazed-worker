@@ -52,6 +52,7 @@ class Run:
         self.sink = sink
         self.name = name
         self.drain_s = drain_s
+        self._past_drain = False
         self.spec: RunSpec | None = None
         self.deadline = 0.0
         self.tool_calls = 0
@@ -124,6 +125,7 @@ class Run:
         argv, env, user = launch_args(spec)
         self.spec = spec
         self._ending_after_exit = None
+        self._past_drain = False
         self.deadline = time.monotonic() + spec.timeout_s + spec.grace_s
         with contextlib.ExitStack() as files:
             stderr = (
@@ -163,6 +165,7 @@ class Run:
                 code = proc.wait()
                 kill_group(proc)
                 stdout.join(timeout=self.drain_s)
+                self._past_drain = True
             if self._ending_after_exit and spec.harness_stops:
                 self.stop(self._ending_after_exit)
             after_exit = getattr(agent, "after_exit", None)
@@ -181,8 +184,13 @@ class Run:
             self._cancel_if(self.sink.close())
 
     def _read(self, agent: Any, proc: subprocess.Popen) -> None:
-        for line in proc.stdout:
-            self._line(agent, line)
+        try:
+            for line in proc.stdout:
+                if self._past_drain:
+                    return
+                self._line(agent, line)
+        except Exception:
+            log.exception("reading %s's output failed", self.name)
 
     def _line(self, agent: Any, line: str) -> None:
         text = line.strip()

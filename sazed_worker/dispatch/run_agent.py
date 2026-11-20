@@ -265,6 +265,7 @@ class TaskSink:
     def __init__(self, log: Path, mirror: Mirror | None, task: str, worktree: str):
         self.file = log.open("a")
         self.closed = False
+        self.lock = threading.Lock()
         self.evidence = 0
         self.steps = StepSender(mirror, task, worktree)
         self.readings = ReadingSender(mirror)
@@ -282,12 +283,13 @@ class TaskSink:
             self.readings.add(event)
 
     def event(self, line: str, event: dict[str, Any] | None, saved: dict[str, Any] | None) -> bool:
-        if self.closed:
-            return False
-        self.file.write(line)
-        if event is not None and line.startswith("{"):
-            self.evidence += _reads(event)
-            self.queue.put(event)
+        with self.lock:
+            if self.closed:
+                return False
+            self.file.write(line)
+            if event is not None and line.startswith("{"):
+                self.evidence += _reads(event)
+                self.queue.put(event)
         return False
 
     def beat(self, force: bool) -> bool:
@@ -295,12 +297,13 @@ class TaskSink:
 
     def close(self) -> bool:
         """Beats stop now; the step sender closes only after the mirror thread, within CLOSE_S."""
-        if self.closed:
-            return False
-        self.closed = True
+        with self.lock:
+            if self.closed:
+                return False
+            self.closed = True
+            self.file.close()
+            self.queue.put(None)
         self.stop_beats.set()
-        self.file.close()
-        self.queue.put(None)
 
         def drain() -> None:
             self.mirrored.join()

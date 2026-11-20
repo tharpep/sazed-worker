@@ -1,5 +1,6 @@
 """Dispatch through the adapters: the tool cap, Sazed down, a slow sink, the unattended spec."""
 
+import contextlib
 import dataclasses
 import json
 import os
@@ -229,6 +230,46 @@ class DispatchLaunch(unittest.TestCase):
                              self.tmp / "agent.jsonl", None, "t")
         self.assertLess(time.monotonic() - started, 30)
         self.assertTrue(out["result"]["ok"])
+
+    def test_late_output_after_the_drain_bound_is_dropped_cleanly(self):
+        """A grandchild keeps writing past the bound: nothing raises, nothing lands after close."""
+        pid_file = self.tmp / "pid"
+        writer = "import time\nwhile True:\n    print('{\"type\": \"system\"}', flush=True)\n" \
+                 "    time.sleep(0.05)\n"
+        script = (
+            "import json, subprocess, sys\n"
+            f"child = subprocess.Popen([sys.executable, '-c', {writer!r}], "
+            "start_new_session=True)\n"
+            f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+            "print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False,"
+            " 'result': 'x'}), flush=True)\n"
+        )
+        self.addCleanup(self.kill_quietly, pid_file)
+        crashes = []
+        log = self.tmp / "agent.jsonl"
+        with (
+            mock.patch.object(threading, "excepthook", crashes.append),
+            mock.patch.object(run_agent, "DRAIN_S", 0.5),
+            self.assertNoLogs("sazed-worker", level="ERROR"),
+        ):
+            out = run_agent._run(spec_for([sys.executable, "-c", script], self.tmp), log, None, "t")
+            lines = len(log.read_text().splitlines())
+            time.sleep(1)
+        self.assertTrue(out["result"]["ok"])
+        self.assertEqual(len(log.read_text().splitlines()), lines)
+        self.assertEqual(crashes, [])
+
+    def kill_quietly(self, pid_file: Path) -> None:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
+
+    def test_a_reader_error_is_logged_and_the_row_unchanged(self):
+        script = "import sys; sys.stdout.buffer.write(bytes([255, 254, 10])); sys.stdout.flush()"
+        with self.assertLogs("sazed-worker", level="ERROR") as logs:
+            out = run_agent._run(spec_for([sys.executable, "-c", script], self.tmp),
+                                 self.tmp / "agent.jsonl", None, "t")
+        self.assertIn("UnicodeDecodeError", "\n".join(logs.output))
+        self.assertIsNone(out["result"])
 
 
 if __name__ == "__main__":
