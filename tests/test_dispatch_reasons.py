@@ -1,14 +1,38 @@
 """Every red board row carries a reason from the one closed list (seam 3, S3-1 and S3-2)."""
 
+import ast
 import tempfile
 import unittest
 from pathlib import Path
 
 from sazed_worker.dispatch import run_agent
 from sazed_worker.dispatch.board import STATES, Board
-from sazed_worker.dispatch.plan import Task
+from sazed_worker.dispatch.plan import Plan, Task
 from sazed_worker.dispatch.reasons import NEEDS_REASON, REASONS
-from sazed_worker.dispatch.run_agent import task_spec
+from sazed_worker.dispatch.run_agent import refusal, task_spec
+from tests import registry
+
+DISPATCH = Path(__file__).resolve().parents[1] / "sazed_worker" / "dispatch"
+
+
+def unreasoned_writes(source: str) -> list[int]:
+    """Lines of board.write(...) and Landing(...) calls that can write a red row with no reason."""
+    out = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+        if name == "write" and len(node.args) >= 2:
+            state = node.args[1]
+        elif name == "Landing" and node.args:
+            state = node.args[0]
+        else:
+            continue
+        safe = isinstance(state, ast.Constant) and state.value not in NEEDS_REASON
+        if not safe and not any(k.arg == "reason" for k in node.keywords):
+            out.append(node.lineno)
+    return out
 
 
 class NoCommits:
@@ -93,6 +117,67 @@ class Finish(unittest.TestCase):
     def test_the_list_holds_the_worker_codes_and_not_the_reapers(self):
         self.assertEqual(len(REASONS), 18)
         self.assertNotIn("no_heartbeat", REASONS)
+
+
+class Writers(unittest.TestCase):
+    def test_every_red_row_written_in_dispatch_passes_a_reason(self):
+        """A writer added later without reason= fails here, not mid-run in Board.write."""
+        found = {
+            path.name: lines
+            for path in sorted(DISPATCH.glob("*.py"))
+            if (lines := unreasoned_writes(path.read_text()))
+        }
+        self.assertEqual(found, {})
+
+    def test_the_scan_catches_a_missing_reason(self):
+        source = (
+            'board.write(t, "failed", "x")\n'
+            'board.write(t, landing.state, landing.line)\n'
+            'Landing("conflict", "x")\n'
+            'board.write(t, "blocked", "x", reason="overlap")\n'
+            'board.write(t, "done", "x")\n'
+            'Landing("landed", "x", "ref")\n'
+        )
+        self.assertEqual(unreasoned_writes(source), [1, 2, 3])
+
+
+class Upstream(unittest.TestCase):
+    """S3-2: a blocked task reads dependency_failed when anything upstream at any depth is red."""
+
+    def setUp(self):
+        registry.install()
+        self.board = Board(Path(tempfile.mkdtemp(prefix="seam3-upstream-")))
+
+    def plan(self, edges: dict[str, list[str]]) -> Plan:
+        tasks = [
+            Task(id=t, goal="g", done="d", owns=[f"src/{t}/**"], profile="implement",
+                 depends_on=deps)
+            for t, deps in edges.items()
+        ]
+        return Plan(id="p", tasks=tasks)
+
+    def reason(self, plan: Plan, task: str) -> str | None:
+        found = refusal(plan, next(t for t in plan.tasks if t.id == task), self.board, {})
+        return found[1] if found else None
+
+    def test_a_chain_behind_a_timed_out_task(self):
+        plan = self.plan({"a": [], "b": ["a"], "c": ["b"]})
+        self.board.write("a", "timed_out", "timed out after 2 s", reason="timeout")
+        self.board.write("b", "blocked", "waiting on a to land", reason="dependency_failed")
+        self.assertEqual(self.reason(plan, "b"), "dependency_failed")
+        self.assertEqual(self.reason(plan, "c"), "dependency_failed")
+
+    def test_a_diamond_with_one_red_branch(self):
+        plan = self.plan({"a": [], "b": ["a"], "c": [], "d": ["b", "c"]})
+        self.board.write("a", "conflict", "rebase conflicted", reason="conflict")
+        self.board.write("c", "running", "go")
+        self.assertEqual(self.reason(plan, "d"), "dependency_failed")
+
+    def test_a_chain_whose_far_upstream_task_is_only_pending(self):
+        plan = self.plan({"a": [], "b": ["a"], "c": ["b"]})
+        self.board.write("a", "done", "finished, not landed")
+        self.board.write("b", "blocked", "waiting on a to land", reason="dependency_pending")
+        self.assertEqual(self.reason(plan, "c"), "dependency_pending")
 
 
 if __name__ == "__main__":

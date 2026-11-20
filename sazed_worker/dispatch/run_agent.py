@@ -99,13 +99,29 @@ def unready_deps(plan: Plan, task: Task, board: Board, config: dict[str, Any]) -
     return out
 
 
+def _red_upstream(plan: Plan, start: list[str], board: Board) -> bool:
+    """Whether any of these tasks, or anything they depend on at any depth, is red."""
+    tasks = {t.id: t for t in plan.tasks}
+    seen: set[str] = set()
+    todo = list(start)
+    while todo:
+        tid = todo.pop()
+        if tid in seen:
+            continue
+        seen.add(tid)
+        if board.state(tid) in RED:
+            return True
+        todo.extend(tasks[tid].depends_on)
+    return False
+
+
 def refusal(
     plan: Plan, task: Task, board: Board, config: dict[str, Any]
 ) -> tuple[str, str] | None:
     """Why this task can't start yet, as its line and reason, or None."""
     waiting_on = unready_deps(plan, task, board, config)
     if waiting_on:
-        red = any(board.state(dep) in RED for dep in waiting_on)
+        red = _red_upstream(plan, waiting_on, board)
         reason = "dependency_failed" if red else "dependency_pending"
         return f"waiting on {', '.join(waiting_on)} to land", reason
     tasks = {t.id: t for t in plan.tasks}
