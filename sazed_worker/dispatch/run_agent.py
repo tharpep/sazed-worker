@@ -9,8 +9,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from sazed_worker.adapters import claude
 from sazed_worker.adapters.contract import RunSpec
-from sazed_worker.dispatch import mcp
+from sazed_worker.dispatch import mcp, unattended
 from sazed_worker.dispatch import settings as agent_settings
 from sazed_worker.dispatch.board import RED, Board
 from sazed_worker.dispatch.mirror import Mirror
@@ -40,6 +41,9 @@ EVIDENCE_TOOLS = (
     "list_dir",
 )
 READ_ONLY_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "Bash")
+UNATTENDED_READ_TOOLS = ("Read", "Grep", "Glob")
+UNATTENDED_TOOLS = (*UNATTENDED_READ_TOOLS, "Edit", "Write")
+UNATTENDED_ALLOWED = (*UNATTENDED_READ_TOOLS, "Edit(./**)", "Write(./**)")
 STOPPED = {
     "budget": ("went over its budget", "budget"),
     "refusal": ("the model refused to continue", "refused"),
@@ -66,10 +70,25 @@ Rules:
   the question you need answered."""
 
 
-def prompt_for(plan: Plan, task: Task, read_only: bool, check: str | None) -> str:
+NO_SHELL_RULE = (
+    " You have no shell. The run_check tool runs the check above; it takes no arguments."
+)
+NO_SHELL_COMMIT_RULE = (
+    " You have no shell. Call the run_check tool to test your work: it takes no arguments and"
+    " runs the check above. Do not commit: when you finish with state done, your changes"
+    " inside your paths are committed for you, and anything else is discarded."
+)
+
+
+def prompt_for(
+    plan: Plan, task: Task, read_only: bool, check: str | None, unattended: bool = False
+) -> str:
     if read_only:
         scope = "This is a read-only task: you change no files, and your result is the summary."
-        commit_rule = ""
+        commit_rule = NO_SHELL_RULE if unattended else ""
+    elif unattended:
+        scope = f"You own these paths, and only these: {', '.join(task.owns)}"
+        commit_rule = NO_SHELL_COMMIT_RULE
     else:
         scope = f"You own these paths, and only these: {', '.join(task.owns)}"
         commit_rule = (
@@ -191,6 +210,49 @@ def task_spec(
     )
 
 
+def unattended_spec(
+    cfg: dict[str, Any],
+    worktree: Path,
+    prompt: str,
+    settings_path: Path,
+    mcp_config: Path,
+    read_only: bool,
+    env_extra: dict[str, str],
+    stderr_path: Path | None = None,
+) -> RunSpec:
+    """Claude as the agent user, minimal environment, no shell, run_check its only MCP tool."""
+    if cfg.get("engine", "claude") != "claude":
+        raise ValueError("an unattended run launches only claude")
+    effort = cfg.get("effort")
+    tools = UNATTENDED_READ_TOOLS if read_only else UNATTENDED_TOOLS
+    allowed = UNATTENDED_READ_TOOLS if read_only else UNATTENDED_ALLOWED
+    return RunSpec(
+        engine="claude",
+        binary=_claude(),
+        prompt=prompt,
+        model=str(cfg["model"]),
+        cwd=worktree,
+        effort=str(effort) if effort else None,
+        output_schema=STATE_SCHEMA,
+        timeout_s=int(cfg["timeout_s"]),
+        max_tool_calls=cfg.get("max_tool_calls"),
+        env="minimal",
+        env_extra=claude.extra_env() | env_extra,
+        as_agent=True,
+        argv_layout="dispatch",
+        stderr_path=stderr_path,
+        harness_stops=True,
+        permission_mode="dontAsk",
+        settings=settings_path,
+        setting_sources="project",
+        budget_usd=cfg.get("budget_usd"),
+        tools=",".join(tools),
+        denied_tools=tuple(claude.SECRET_READS),
+        mcp_config=mcp_config,
+        allowed_tools=(*allowed, unattended.RUN_CHECK),
+    )
+
+
 def run_task(
     plan: Plan, task: Task, ws: Workspace, board: Board, config: dict[str, Any] | None = None
 ) -> dict[str, Any]:
@@ -206,11 +268,6 @@ def run_task(
     worktree = ws.create(task.id)
     run_dir = ws.home / "runs" / task.id
     engine = cfg.get("engine", "claude")
-    settings_path = agent_settings.build(
-        worktree, task.owns, run_dir, timeout_s, engine=engine, read_only=read_only
-    )
-    granted = mcp.build(cfg.get("mcp") or {}, run_dir) if engine != "agy" else mcp.Grant()
-    prompt = prompt_for(plan, task, read_only, check)
     task_env = {
         "DISPATCH_TASK": task.id,
         "DISPATCH_OWNS": json.dumps(task.owns),
@@ -218,9 +275,26 @@ def run_task(
         "DISPATCH_ENGINE": engine,
     }
     stderr_path = run_dir / "agent.stderr"
-    spec = task_spec(
-        cfg, worktree, prompt, settings_path, read_only, granted, task_env, stderr_path
-    )
+    is_unattended = bool(config.get("unattended"))
+    if is_unattended:
+        if not isinstance(ws, unattended.UnattendedWorkspace):
+            raise TypeError("an unattended run needs an UnattendedWorkspace")
+        settings_path = agent_settings.build_unattended(worktree, task.owns, run_dir, read_only)
+        mcp_config = ws.check_tool(task.id, str(check), timeout_s, run_dir)
+        granted = mcp.Grant()
+        prompt = prompt_for(plan, task, read_only, check, unattended=True)
+        spec = unattended_spec(
+            cfg, worktree, prompt, settings_path, mcp_config, read_only, task_env, stderr_path
+        )
+    else:
+        settings_path = agent_settings.build(
+            worktree, task.owns, run_dir, timeout_s, engine=engine, read_only=read_only
+        )
+        granted = mcp.build(cfg.get("mcp") or {}, run_dir) if engine != "agy" else mcp.Grant()
+        prompt = prompt_for(plan, task, read_only, check)
+        spec = task_spec(
+            cfg, worktree, prompt, settings_path, read_only, granted, task_env, stderr_path
+        )
     board.write(
         task.id,
         "running",
@@ -229,7 +303,8 @@ def run_task(
         profile=cfg["profile"],
     )
     outcome = _run(spec, run_dir / "agent.jsonl", board.mirror, task.id)
-    return _finish(task, ws, board, outcome, spec, read_only, bool(cfg.get("evidence_required")))
+    evidence_required = bool(cfg.get("evidence_required"))
+    return _finish(task, ws, board, outcome, spec, read_only, evidence_required, is_unattended)
 
 
 def _reads(event: dict[str, Any]) -> int:
@@ -373,6 +448,7 @@ def _finish(
     spec: RunSpec,
     read_only: bool,
     evidence_required: bool = False,
+    unattended_run: bool = False,
 ) -> dict[str, Any]:
     result = outcome["result"] or {}
     cost = result.get("cost_usd")
@@ -409,6 +485,15 @@ def _finish(
     if evidence_required and not outcome["evidence"]:
         return failed("no evidence read", "no_evidence")
     summary = structured.get("summary") or "done"
+    if not read_only and unattended_run:
+        assert isinstance(ws, unattended.UnattendedWorkspace)
+        committed, discarded = ws.commit_owned(task, summary)
+        if not committed:
+            line = f"changed nothing inside owns: {summary}"
+            return board.write(
+                task.id, "failed", line, reason="no_change", discarded=discarded, **common
+            )
+        return board.write(task.id, "done", summary, discarded=discarded, **common)
     if not read_only and ws.commits(task.id) == 0:
         return failed(f"said done but made no commits: {summary}", "no_change")
     return board.write(task.id, "done", summary, **common)

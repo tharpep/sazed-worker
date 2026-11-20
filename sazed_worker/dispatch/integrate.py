@@ -11,7 +11,7 @@ from sazed_worker.dispatch.board import RED, Board
 from sazed_worker.dispatch.plan import Plan, Task, resolve
 from sazed_worker.dispatch.rules import glob_match
 from sazed_worker.dispatch.run_agent import refusal, run_task, unready_deps
-from sazed_worker.dispatch.workspace import Workspace, run_code
+from sazed_worker.dispatch.workspace import Workspace
 
 NO_TESTS_RAN = 5
 
@@ -57,7 +57,7 @@ def init(
             path = ws.integ_dir / rel
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content)
-        code, out = run_code(_check(plan, None, config), ws.integ_dir)
+        code, out = ws.run_code(_check(plan, None, config), ws.integ_dir)
         if code not in (0, NO_TESTS_RAN):
             if fresh:
                 ws.discard([])

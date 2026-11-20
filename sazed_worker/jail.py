@@ -12,13 +12,15 @@ workspace read-only except a scratch copy and a throwaway cache (no cache a late
 poisoned), no network and an empty /run (no system sockets), and a cap on processes.
 """
 
+import os
 import resource
 import shutil
 import subprocess
 from pathlib import Path
 
+from . import config
 from .agent_process import agent_env, as_agent, kill_group
-from .config import AGENT_HOME, AGENT_USER, BWRAP
+from .config import AGENT_USER, BWRAP
 
 
 def home_for(root: Path) -> Path:
@@ -33,12 +35,14 @@ def run_jailed(
     timeout: int,
     env: dict[str, str] | None = None,
     untrusted_writable: list[Path] | None = None,
+    read_only: list[Path] | None = None,
 ) -> tuple[int | None, str, str]:
     """(exit code, stdout, stderr) of cmd run in the jail with `root` (the job's workspace)
     writable; exit code None if it couldn't run or finish.
 
     With `untrusted_writable` (the test run): only those paths are writable, there's no network
-    and no /run, and the process count is capped."""
+    and no /run, and the process count is capped. `read_only` paths are bound read-only last, so
+    they stay read-only inside a writable path and stay visible under the agent's home."""
     if not Path(BWRAP).exists():
         return None, "", "bubblewrap isn't installed"
     home = home_for(root)
@@ -51,7 +55,7 @@ def run_jailed(
         "--dev", "/dev",
         "--proc", "/proc",
         "--tmpfs", "/tmp",
-        "--tmpfs", str(AGENT_HOME),  # hides ~/.claude, ~/.gemini and every other job
+        "--tmpfs", str(config.AGENT_HOME),  # hides ~/.claude, ~/.gemini and every other job
         *(
             ["--ro-bind", str(root), str(root)]
             + [arg for path in untrusted_writable for arg in ("--bind", str(path), str(path))]
@@ -59,6 +63,7 @@ def run_jailed(
             if untrusted_writable is not None
             else ["--bind", str(root), str(root)]
         ),
+        *[arg for path in read_only or [] for arg in ("--ro-bind", str(path), str(path))],
         "--unshare-pid",
         "--unshare-ipc",
         "--die-with-parent",
@@ -76,7 +81,7 @@ def run_jailed(
             text=True,
             start_new_session=True,
             preexec_fn=_cap_processes if untrusted_writable is not None else None,
-            **as_agent(),
+            **_switch_to_agent(),
         )
     except OSError as e:
         return None, "", str(e)
@@ -86,6 +91,11 @@ def run_jailed(
         kill_group(proc)
         return None, "", f"{Path(cmd[0]).name} timed out"
     return proc.returncode, out, err
+
+
+def _switch_to_agent() -> dict:
+    """as_agent(), or nothing when this process already is the agent and so cannot switch."""
+    return {} if os.geteuid() == config.AGENT_UID else as_agent()
 
 
 MAX_TEST_PROCESSES = 512  # per the agent user; nothing else of the agent's runs during tests

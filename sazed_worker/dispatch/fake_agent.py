@@ -1,4 +1,4 @@
-"""Stands in for `claude -p` in tests: one commit and a schema-shaped final event, no tokens."""
+"""Stands in for `claude -p` in tests: a commit or no-shell writes, a schema-shaped final event."""
 
 import json
 import os
@@ -20,6 +20,83 @@ def _commit(path: Path, text: str, message: str) -> None:
     path.write_text(text)
     subprocess.run(["git", "add", "--", str(path)], check=True, capture_output=True)
     subprocess.run(["git", "commit", "-q", "-m", message], check=True, capture_output=True)
+
+
+def _emit(event: dict) -> None:
+    print(json.dumps(event), flush=True)
+
+
+def _write(path: Path, text: str, n: int) -> None:
+    """The Write tool, as claude reports it; the no-shell modes never run git."""
+    block = {"type": "tool_use", "id": f"toolu_w{n}", "name": "Write",
+             "input": {"file_path": str(path), "content": text}}
+    _emit({"type": "assistant", "message": {"content": [block]}})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+class CheckServer:
+    """The run_check server named in --mcp-config, spoken to over stdio as claude does."""
+
+    def __init__(self) -> None:
+        config = json.loads(Path(sys.argv[sys.argv.index("--mcp-config") + 1]).read_text())
+        server = config["mcpServers"]["check"]
+        self.proc = subprocess.Popen(
+            [server["command"], *server.get("args", [])],
+            env=os.environ | server.get("env", {}),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        self.next_id = 0
+        self.request("initialize", {"protocolVersion": "2025-06-18", "capabilities": {},
+                                    "clientInfo": {"name": "fake-agent", "version": "1"}})
+        self.proc.stdin.write(json.dumps({"jsonrpc": "2.0",
+                                          "method": "notifications/initialized"}) + "\n")
+        tools = self.request("tools/list", {})["tools"]
+        if [t["name"] for t in tools] != ["run_check"]:
+            raise SystemExit(f"unexpected tools {tools}")
+
+    def request(self, method: str, params: dict) -> dict:
+        self.next_id += 1
+        message = {"jsonrpc": "2.0", "id": self.next_id, "method": method, "params": params}
+        self.proc.stdin.write(json.dumps(message) + "\n")
+        self.proc.stdin.flush()
+        return json.loads(self.proc.stdout.readline())["result"]
+
+    def run_check(self) -> bool:
+        """One run_check call and its result, as claude's stream-json shows them."""
+        call_id = f"toolu_c{self.next_id}"
+        block = {"type": "tool_use", "id": call_id, "name": "mcp__check__run_check", "input": {}}
+        _emit({"type": "assistant", "message": {"content": [block]}})
+        result = self.request("tools/call", {"name": "run_check", "arguments": {}})
+        reply = {"type": "tool_result", "tool_use_id": call_id, "content": result["content"],
+                 "is_error": result["isError"]}
+        _emit({"type": "user", "message": {"role": "user", "content": [reply]}})
+        return not result["isError"]
+
+    def close(self) -> None:
+        self.proc.stdin.close()
+        self.proc.wait(timeout=10)
+
+
+def _no_shell(mode: str, owns: list[str], task: str) -> None:
+    """The unattended agent: writes files, tests them with run_check, never commits."""
+    server = CheckServer()
+    target = _target(owns, task)
+    if mode == "noshell":
+        _write(target, f"{task}\n", 1)
+        _write(Path("README.md"), f"{task} strayed\n", 2)
+        server.run_check()
+    elif mode == "noshell-fix":
+        _write(target, "FAIL\n", 1)
+        if not server.run_check():
+            _write(target, f"{task} fixed\n", 2)
+        server.run_check()
+    elif mode == "noshell-nochange":
+        _write(Path("stray.txt"), "outside owns\n", 1)
+        server.run_check()
+    server.close()
 
 
 def main() -> None:
@@ -45,6 +122,8 @@ def main() -> None:
         _commit(Path("README.md"), f"{task} strayed\n", f"{task}: stray edit")
     elif mode == "failcheck":
         _commit(_target(owns, task), "FAIL\n", f"{task}: breaks the check")
+    elif mode.startswith("noshell"):
+        _no_shell(mode, owns, task)
     elif mode == "nocommit":
         pass
     elif mode == "waiting":
