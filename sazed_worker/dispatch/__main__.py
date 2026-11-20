@@ -134,6 +134,9 @@ def _act(args: argparse.Namespace) -> int:
     except pr_export.ExportRefused as e:
         print(f"refused: {e} (reason: {e.reason})")
         return 1
+    except pr_export.ExportUnclear as e:
+        print(e)
+        return 1
     except (
         plans.PlanError,
         profiles.ProfilesError,

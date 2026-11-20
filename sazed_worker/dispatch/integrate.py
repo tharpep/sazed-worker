@@ -146,10 +146,12 @@ def export(
         if unattended:
             raise pr_export.ExportRefused("refused", sentence)
         raise IntegrateError(sentence)
-    start = pr_export.base_sha(ws, base)
-    body = body or pr_export.body(plan, ws, board, start)
     if unattended:
+        start = pr_export.base_sha(ws, base)
+        body = body or pr_export.body(plan, ws, board, start)
         return pr_export.send(plan.id, pr_export.request(ws, base, start, title, body))
+    if open_pr and not body:
+        body = pr_export.body(plan, ws, board, pr_export.base_sha(ws, base))
     branch = ws.export()
     if not open_pr:
         return branch

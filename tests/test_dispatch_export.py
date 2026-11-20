@@ -99,8 +99,8 @@ class ExportCase(unittest.TestCase):
             code = main([*args, str(self.plan_file), "--repo", str(self.repo)])
         return code, out.getvalue()
 
-    def recorded_export(self, *args: str) -> tuple[int, str, list[list[str]]]:
-        """Runs export through the CLI and returns every git and gh argv that is not a read."""
+    def recorded_export(self, *args: str, reads: bool = False) -> tuple[int, str, list[list[str]]]:
+        """Runs export through the CLI and returns every git and gh argv, reads only if asked."""
         calls: list[list[str]] = []
         real = subprocess.run
 
@@ -110,6 +110,8 @@ class ExportCase(unittest.TestCase):
 
         with mock.patch("subprocess.run", side_effect=record):
             code, out = self.cli("export", *args)
+        if reads:
+            return code, out, calls
         acting = [c for c in calls if not (c[0] == "git" and c[1] in GIT_READS)]
         return code, out, acting
 
@@ -144,9 +146,26 @@ class HandExport(ExportCase):
         )
         self.assertTrue(git("rev-parse", "--verify", "-q", "refs/heads/integ/p1", cwd=self.remote))
 
-    def test_a_hand_export_never_imports_config(self):
-        """A hand export succeeds where the worker's agent user does not exist, so it never
-        imports sazed_worker.config, which looks that user up at import."""
+    def test_a_hand_export_with_a_body_or_no_pr_runs_only_what_it_ran_before(self):
+        """Pins every git and gh call, reads included, for a hand export given --body or
+        --no-pr: no read before the push, so a base that exists only on the remote still works."""
+        integrate.go(_plan(), self.ws, self.board, "main")
+        code, out, calls = self.recorded_export("--base", "release", "--body", "hand", reads=True)
+        self.assertEqual((code, out.strip()), (0, "https://pr/1"))
+        self.assertEqual(
+            calls,
+            [
+                ["git", "push", "-q", "-u", "origin", "integ/p1"],
+                [*GH, "pr", "create", "--draft", "--base", "release", "--head", "integ/p1"]
+                + ["--title", "p1", "--body", "hand"],
+            ],
+        )
+        code, out, calls = self.recorded_export("--base", "release", "--no-pr", reads=True)
+        self.assertEqual((code, out.strip()), (0, "integ/p1"))
+        self.assertEqual(calls, [["git", "push", "-q", "-u", "origin", "integ/p1"]])
+
+    def test_a_hand_export_works_without_an_agent_user(self):
+        """A hand export succeeds on a machine with no agent user, as the worker's has."""
         integrate.go(_plan(), self.ws, self.board, "main")
         env = os.environ | {"SAZED_AGENT_USER": "no-such-user-seam6"}
         proc = subprocess.run(
@@ -266,45 +285,88 @@ class UnattendedExport(ExportCase):
             out.strip(), r"^refused: Sazed could not be reached .*\(reason: export_unreachable\)$"
         )
 
+    def test_a_success_without_a_pr_url_is_not_a_refusal_and_exits_non_zero(self):
+        integrate.go(_plan(), self.ws, self.board, "main")
+        for answer in ({"number": 7}, ["not", "an", "object"]):
+            with self.subTest(answer=answer):
+                self.server.answer = (200, answer)
+                code, out = self.cli("export", "--unattended")
+                self.assertEqual(code, 1)
+                self.assertRegex(out.strip(), r"^Sazed answered 200 without a PR URL, so a PR may")
+
+    def test_a_long_refusal_cut_by_the_client_keeps_424_as_export_unreachable(self):
+        integrate.go(_plan(), self.ws, self.board, "main")
+        for status, reason in ((424, "export_unreachable"), (422, "refused")):
+            with self.subTest(status=status):
+                self.server.answer = (status, {"detail": "x" * 600, "reason": reason})
+                code, out = self.cli("export", "--unattended")
+                self.assertEqual(code, 1)
+                self.assertRegex(
+                    out.strip(), rf"^refused: Sazed answered {status}: .*\(reason: {reason}\)$"
+                )
+
     def test_each_refusal_prints_one_sentence_with_its_reason_and_sends_nothing(self):
         cases = {
-            "unlanded": "refused",
-            "plan_id": "refused",
-            "submodule": "refused",
-            "workflow": "refused",
-            "too_many_files": "export_too_large",
-            "too_large": "export_too_large",
+            "unlanded": ("refused", "not every code task landed"),
+            "plan_id_too_long": ("refused", "cannot form the branch"),
+            "plan_id_trailing_dot": ("refused", "cannot form the branch"),
+            "plan_id_lock": ("refused", "cannot form the branch"),
+            "plan_id_dots": ("refused", "cannot form the branch"),
+            "title": ("refused", "the title is 257 characters"),
+            "body": ("refused", "the body is 60001 characters"),
+            "submodule": ("refused", "lib is a submodule"),
+            "workflow": ("refused", "may not write .github/workflows/ci.yml"),
+            "github_file": ("refused", "may not write .github,"),
+            "workflows_file": ("refused", "may not write .github/workflows,"),
+            "not_utf8": ("refused", "caf\\xe9.txt is not a UTF-8 path"),
+            "empty": ("refused", "nothing to export"),
+            "too_many_files": ("export_too_large", "too many files"),
+            "too_large": ("export_too_large", "base64 characters > 6990506"),
         }
         integrate.init(_plan(), self.ws, self.board, "main")
         code, out = self.cli("export", "--unattended")
         outputs = {"unlanded": (code, out)}
-        self.plan_file.write_text(json.dumps(PLAN_JSON | {"id": "p" * 76}))
-        outputs["plan_id"] = self.cli("export", "--unattended")
+        for name, bad_id in (
+            ("plan_id_too_long", "p" * 76),
+            ("plan_id_trailing_dot", "p1."),
+            ("plan_id_lock", "p1.lock"),
+            ("plan_id_dots", "p..1"),
+        ):
+            self.plan_file.write_text(json.dumps(PLAN_JSON | {"id": bad_id}))
+            outputs[name] = self.cli("export", "--unattended")
         self.plan_file.write_text(json.dumps(PLAN_JSON))
         integrate.go(_plan(), self.ws, self.board, "main")
+        outputs["title"] = self.cli("export", "--unattended", "--title", "t" * 257)
+        outputs["body"] = self.cli("export", "--unattended", "--body", "b" * 60_001)
         tip = self.ws.tip()
         sha = git("rev-parse", "HEAD", cwd=self.ws.integ_dir)
         edits = {
             "submodule": lambda: ["update-index", "--add", "--cacheinfo", f"160000,{sha},lib"],
             "workflow": lambda: ["add", "--", self.write(".github/workflows/ci.yml", b"on:\n")],
+            "github_file": lambda: ["add", "--", self.write(".github", b"x\n")],
+            "workflows_file": lambda: ["add", "--", self.write(".github/workflows", b"x\n")],
+            "not_utf8": lambda: ["add", "--", self.write(os.fsdecode(b"caf\xe9.txt"), b"x")],
+            "empty": lambda: ["rm", "-q", "-r", "--", "src", "docs"],
             "too_many_files": lambda: [
                 "add",
                 "--",
                 *[self.write(f"many/{i}.txt", b"x") for i in range(201)],
             ],
-            "too_large": lambda: ["add", "--", self.write("big.bin", b"x" * (5 * 1024 * 1024 + 1))],
+            "too_large": lambda: ["add", "--", self.write("big.bin", b"x" * (5 * 1024 * 1024))],
         }
         for name, index_args in edits.items():
             git(*index_args(), cwd=self.ws.integ_dir)
             git("commit", "-q", "-m", name, cwd=self.ws.integ_dir)
             outputs[name] = self.cli("export", "--unattended")
             git("reset", "-q", "--hard", tip, cwd=self.ws.integ_dir)
-        for name, reason in cases.items():
+            git("clean", "-q", "-fd", cwd=self.ws.integ_dir)
+        for name, (reason, fragment) in cases.items():
             with self.subTest(name):
                 code, out = outputs[name]
                 self.assertEqual(code, 1)
                 self.assertEqual(len(out.strip().splitlines()), 1, out)
                 self.assertRegex(out.strip(), rf"^refused: \S.* \(reason: {reason}\)$")
+                self.assertIn(fragment, out)
         self.assertEqual(self.server.seen, [])
 
     def write(self, rel: str, data: bytes) -> str:
