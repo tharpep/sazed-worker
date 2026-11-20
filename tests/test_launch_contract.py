@@ -126,6 +126,31 @@ class Events(unittest.TestCase):
         claude.handle_event(self.run, tool_use(2))
         self.assertEqual(self.run.stop_reason, "tool_cap")
 
+    def test_the_structured_answer_is_not_capped(self):
+        """S3-4: --json-schema's answer arrives as a StructuredOutput tool call (seen on a real
+        run on 2026-11-20); it is not counted, and every other tool call still is."""
+        answer = {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_01StructuredAnswer",
+                        "name": "StructuredOutput",
+                        "input": {"state": "done", "summary": "added the field"},
+                    }
+                ],
+            },
+            "session_id": "s1",
+        }
+        for i in range(2):
+            claude.handle_event(self.run, tool_use(i))
+        claude.handle_event(self.run, answer)
+        self.assertEqual((self.run.tool_calls, self.run.stop_reason), (2, None))
+        claude.handle_event(self.run, tool_use(2, "mcp__run_check__run_check"))
+        self.assertEqual(self.run.stop_reason, "tool_cap")
+
     def test_a_null_cap_means_no_cap(self):
         self.run.spec = spec(max_tool_calls=None)
         for i in range(500):

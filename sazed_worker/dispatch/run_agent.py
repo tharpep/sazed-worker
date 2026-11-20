@@ -12,7 +12,7 @@ from typing import Any
 from sazed_worker.adapters.contract import RunSpec
 from sazed_worker.dispatch import mcp
 from sazed_worker.dispatch import settings as agent_settings
-from sazed_worker.dispatch.board import Board
+from sazed_worker.dispatch.board import RED, Board
 from sazed_worker.dispatch.mirror import Mirror
 from sazed_worker.dispatch.plan import Plan, Task, could_overlap, resolve
 from sazed_worker.dispatch.steps import StepSender
@@ -40,11 +40,12 @@ EVIDENCE_TOOLS = (
     "list_dir",
 )
 READ_ONLY_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit", "Bash")
-STOPPED_LINES = {
-    "refusal": "the model refused to continue",
-    "max_tokens": "stopped at the model's output token limit",
-    "shutdown": "stopped because dispatch was shutting down",
-    "cancelled": "cancelled",
+STOPPED = {
+    "budget": ("went over its budget", "budget"),
+    "refusal": ("the model refused to continue", "refused"),
+    "max_tokens": ("stopped at the model's output token limit", "max_tokens"),
+    "shutdown": ("stopped because dispatch was shutting down", "cancelled"),
+    "cancelled": ("cancelled", "cancelled"),
 }
 DRAIN_S = 5
 CLOSE_S = 10
@@ -98,17 +99,37 @@ def unready_deps(plan: Plan, task: Task, board: Board, config: dict[str, Any]) -
     return out
 
 
-def refusal(plan: Plan, task: Task, board: Board, config: dict[str, Any]) -> str | None:
-    """Why this task can't start yet, or None."""
+def _red_upstream(plan: Plan, start: list[str], board: Board) -> bool:
+    """Whether any of these tasks, or anything they depend on at any depth, is red."""
+    tasks = {t.id: t for t in plan.tasks}
+    seen: set[str] = set()
+    todo = list(start)
+    while todo:
+        tid = todo.pop()
+        if tid in seen:
+            continue
+        seen.add(tid)
+        if board.state(tid) in RED:
+            return True
+        todo.extend(tasks[tid].depends_on)
+    return False
+
+
+def refusal(
+    plan: Plan, task: Task, board: Board, config: dict[str, Any]
+) -> tuple[str, str] | None:
+    """Why this task can't start yet, as its line and reason, or None."""
     waiting_on = unready_deps(plan, task, board, config)
     if waiting_on:
-        return f"waiting on {', '.join(waiting_on)} to land"
+        red = _red_upstream(plan, waiting_on, board)
+        reason = "dependency_failed" if red else "dependency_pending"
+        return f"waiting on {', '.join(waiting_on)} to land", reason
     tasks = {t.id: t for t in plan.tasks}
     for other, row in board.latest().items():
         if other == task.id or row["state"] != "running" or other not in tasks:
             continue
         if any(could_overlap(a, b) for a in task.owns for b in tasks[other].owns):
-            return f"its paths overlap {other}, which is running"
+            return f"its paths overlap {other}, which is running", "overlap"
     return None
 
 
@@ -177,7 +198,8 @@ def run_task(
     cfg = resolve(task, config)
     blocked = refusal(plan, task, board, config)
     if blocked:
-        return board.write(task.id, "blocked", blocked)
+        line, reason = blocked
+        return board.write(task.id, "blocked", line, reason=reason)
     read_only = bool(cfg["read_only"])
     timeout_s = int(cfg["timeout_s"])
     check = task.check or plan.check or config.get("check")
@@ -361,32 +383,32 @@ def _finish(
         "turns": result.get("turns"),
     }
     stopped = outcome["stop_reason"]
+
+    def failed(line: str, reason: str) -> dict[str, Any]:
+        return board.write(task.id, "failed", line, reason=reason, **common)
+
     if stopped == "timed_out":
-        return board.write(task.id, "failed", f"timed out after {spec.timeout_s} s", **common)
+        line = f"timed out after {spec.timeout_s} s"
+        return board.write(task.id, "timed_out", line, reason="timeout", **common)
     if stopped == "tool_cap":
-        line = f"hit the tool cap of {spec.max_tool_calls} calls"
-        return board.write(task.id, "failed", line, **common)
-    if stopped == "budget":
-        return board.write(task.id, "failed", "went over its budget", **common)
+        return failed(f"hit the tool cap of {spec.max_tool_calls} calls", "tool_cap")
     if stopped == "rate_limit":
-        return board.write(task.id, "failed", _limit_line(outcome["rate_limited"]), **common)
-    if stopped in STOPPED_LINES:
-        return board.write(task.id, "failed", STOPPED_LINES[stopped], **common)
+        return failed(_limit_line(outcome["rate_limited"]), "plan_limit")
+    if stopped in STOPPED:
+        return failed(*STOPPED[stopped])
     if not outcome["result"]:
         detail = outcome["stderr"].strip()[-200:] or "no output"
-        return board.write(
-            task.id, "failed", f"no result (exit {outcome['code']}): {detail}", **common
-        )
+        return failed(f"no result (exit {outcome['code']}): {detail}", "no_result")
     structured = result.get("structured_output") or {}
     if structured.get("state") == "waiting":
         return board.write(
             task.id, "waiting", structured.get("question") or "needs an answer", **common
         )
     if structured.get("state") != "done":
-        return board.write(task.id, "failed", "finished without a done or waiting result", **common)
+        return failed("finished without a done or waiting result", "no_done_state")
     if evidence_required and not outcome["evidence"]:
-        return board.write(task.id, "failed", "no evidence read", **common)
+        return failed("no evidence read", "no_evidence")
     summary = structured.get("summary") or "done"
     if not read_only and ws.commits(task.id) == 0:
-        return board.write(task.id, "failed", f"said done but made no commits: {summary}", **common)
+        return failed(f"said done but made no commits: {summary}", "no_change")
     return board.write(task.id, "done", summary, **common)

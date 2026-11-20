@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from sazed_worker.dispatch import pr_export
-from sazed_worker.dispatch.board import Board
+from sazed_worker.dispatch.board import RED, Board
 from sazed_worker.dispatch.plan import Plan, Task, resolve
 from sazed_worker.dispatch.rules import glob_match
 from sazed_worker.dispatch.run_agent import refusal, run_task, unready_deps
@@ -82,10 +82,15 @@ def land(
             p for p in ws.changed_paths(task.id) if not any(glob_match(p, g) for g in task.owns)
         ]
         if strays:
-            rows.append(board.write(task.id, "failed", f"left its owns: {', '.join(strays)}"))
+            line = f"left its owns: {', '.join(strays)}"
+            rows.append(board.write(task.id, "failed", line, reason="left_owns"))
             break
         landing = ws.land(task.id, _check(plan, task, config), plan.regen, int(cfg["timeout_s"]))
-        rows.append(board.write(task.id, landing.state, landing.line, ref=landing.ref))
+        rows.append(
+            board.write(
+                task.id, landing.state, landing.line, ref=landing.ref, reason=landing.reason
+            )
+        )
         if landing.state != "landed":
             break
     return rows
@@ -114,7 +119,7 @@ def go(
                 list(pool.map(lambda t: run_task(plan, t, ws, board, config), ready))
         landed = land(plan, ws, board, config)
         moved = bool(ready) or any(r["state"] == "landed" for r in landed)
-        red = any(r["state"] in ("failed", "conflict") for r in landed)
+        red = any(r["state"] in RED for r in landed)
         if red or not moved:
             return {t.id: board.state(t.id) or "not started" for t in plan.tasks}
 

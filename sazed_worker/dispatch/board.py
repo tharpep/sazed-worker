@@ -5,11 +5,24 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from sazed_worker.dispatch.reasons import NEEDS_REASON, REASONS
+
 if TYPE_CHECKING:
     from sazed_worker.dispatch.mirror import Mirror
 
-STATES = ("running", "done", "waiting", "failed", "landed", "conflict", "blocked", "cleaned")
-SETTLED = ("done", "waiting", "failed", "landed", "conflict", "blocked", "cleaned")
+STATES = (
+    "running",
+    "done",
+    "waiting",
+    "failed",
+    "timed_out",
+    "landed",
+    "conflict",
+    "blocked",
+    "cleaned",
+)
+SETTLED = ("done", "waiting", "failed", "timed_out", "landed", "conflict", "blocked", "cleaned")
+RED = ("failed", "timed_out", "conflict")
 
 
 class Board:
@@ -21,6 +34,13 @@ class Board:
     def write(self, task: str, state: str, line: str, **fields: Any) -> dict[str, Any]:
         if state not in STATES:
             raise ValueError(f"unknown state {state}")
+        reason = fields.pop("reason", None)
+        if reason is None and state in NEEDS_REASON:
+            raise ValueError(f"a {state} row needs a reason")
+        if reason is not None:
+            if reason not in REASONS:
+                raise ValueError(f"unknown reason {reason}")
+            fields["reason"] = reason
         row = {
             "ts": round(time.time(), 3),
             "task": task,

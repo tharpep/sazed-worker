@@ -38,6 +38,7 @@ class Landing:
     state: str
     line: str
     ref: str | None = None
+    reason: str | None = None
 
 
 class Workspace:
@@ -119,20 +120,22 @@ class Workspace:
         )
         if rebase.returncode != 0:
             git("rebase", "--abort", cwd=task_dir, check=False)
-            return Landing("conflict", f"rebase onto {self.integ_branch} conflicted")
+            line = f"rebase onto {self.integ_branch} conflicted"
+            return Landing("conflict", line, reason="conflict")
         git("merge", "-q", "--ff-only", self.task_branch(task_id), cwd=self.integ_dir)
         if regen:
             ok, out = run_shell(regen, self.integ_dir, timeout_s)
             if not ok:
                 self._reset(before)
-                return Landing("failed", f"regen failed: {out[-300:]}")
+                return Landing("failed", f"regen failed: {out[-300:]}", reason="regen_failed")
             git("add", "-A", cwd=self.integ_dir)
             if git("diff", "--cached", "--name-only", cwd=self.integ_dir):
                 git("commit", "-q", "-m", f"regen after {task_id}", cwd=self.integ_dir)
         ok, out = run_shell(check, self.integ_dir, timeout_s)
         if not ok:
             self._reset(before)
-            return Landing("failed", f"check failed after landing: {out[-300:]}")
+            line = f"check failed after landing: {out[-300:]}"
+            return Landing("failed", line, reason="check_failed")
         return Landing("landed", f"landed on {self.integ_branch}", self.tip())
 
     def _cleanup_hooks(self, task_dir: Path) -> None:
