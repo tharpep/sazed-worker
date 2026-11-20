@@ -6,6 +6,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from sazed_worker.dispatch import pr_export
 from sazed_worker.dispatch.board import Board
 from sazed_worker.dispatch.plan import Plan, Task, resolve
 from sazed_worker.dispatch.rules import glob_match
@@ -124,16 +125,33 @@ def export(
     board: Board,
     base: str,
     title: str,
-    body: str,
+    body: str | None,
     config: dict[str, Any] | None = None,
     open_pr: bool = True,
 ) -> str:
-    """Push integ/<plan> and open one draft PR into base; never merges, never targets main."""
+    """Open one draft PR of integ/<plan> into base; never merges, never targets main. By hand
+    it pushes and runs gh; unattended it sends the changed files to Sazed and pushes nothing."""
     config = config or {}
+    unattended = bool(config.get("unattended"))
+    if unattended:
+        pr_export.check_plan_id(plan.id)
+        if not open_pr:
+            raise pr_export.ExportRefused(
+                "refused", "--no-pr only pushes, and an unattended export never pushes"
+            )
     code = [t for t in plan.tasks if not resolve(t, config)["read_only"]]
     unlanded = [t.id for t in code if board.state(t.id) != "landed"]
     if unlanded:
-        raise IntegrateError(f"not every code task landed: {', '.join(unlanded)}")
+        sentence = f"not every code task landed: {', '.join(unlanded)}"
+        if unattended:
+            raise pr_export.ExportRefused("refused", sentence)
+        raise IntegrateError(sentence)
+    if unattended:
+        start = pr_export.base_sha(ws, base)
+        body = body or pr_export.body(plan, ws, board, start)
+        return pr_export.send(plan.id, pr_export.request(ws, base, start, title, body))
+    if open_pr and not body:
+        body = pr_export.hand_body(plan, ws, board, base)
     branch = ws.export()
     if not open_pr:
         return branch

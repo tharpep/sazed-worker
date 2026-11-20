@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from sazed_worker.dispatch import integrate, mcp, profiles
+from sazed_worker.dispatch import integrate, mcp, pr_export, profiles
 from sazed_worker.dispatch import plan as plans
 from sazed_worker.dispatch.board import Board
 from sazed_worker.dispatch.mirror import Mirror
@@ -39,6 +39,7 @@ def _load(args: argparse.Namespace, resolves: bool = True) -> tuple[plans.Plan, 
         mcp.load()
     loaded = plans.load(Path(args.plan))
     config = plans.load_config(Path(args.config) if args.config else None)
+    config["unattended"] = args.unattended
     return loaded, config
 
 
@@ -115,7 +116,7 @@ def _act(args: argparse.Namespace) -> int:
                     board,
                     args.base,
                     args.title or plan.id,
-                    args.body or f"Dispatch plan {plan.id}.",
+                    args.body,
                     config,
                     open_pr=not args.no_pr,
                 )
@@ -130,6 +131,12 @@ def _act(args: argparse.Namespace) -> int:
                     board.mirror.row(row)
         elif args.command == "clean":
             integrate.clean(plan, ws, board)
+    except pr_export.ExportRefused as e:
+        print(f"refused: {e} (reason: {e.reason})")
+        return 1
+    except pr_export.ExportUnclear as e:
+        print(e)
+        return 1
     except (
         plans.PlanError,
         profiles.ProfilesError,
@@ -150,6 +157,11 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name, help=help_text)
         p.add_argument("plan")
         p.add_argument("--config", help="a workstream TOML with defaults, profiles and check")
+        p.add_argument(
+            "--unattended",
+            action="store_true",
+            help="run as the worker does: export sends the PR to Sazed and never pushes",
+        )
         p.set_defaults(func=func)
         if func is _act:
             p.add_argument("--repo", default=".", help="the target repo (default: here)")
@@ -165,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
         "--parallel", type=int, default=3
     )
     command("board", "show each task's latest row")
-    exp = command("export", "push integ/<plan> and open one draft PR")
+    exp = command("export", "open one draft PR of integ/<plan>")
     exp.add_argument("--title")
     exp.add_argument("--body")
     exp.add_argument("--no-pr", action="store_true", help="push only")
