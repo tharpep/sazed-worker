@@ -164,6 +164,37 @@ class HandExport(ExportCase):
         self.assertEqual((code, out.strip()), (0, "integ/p1"))
         self.assertEqual(calls, [["git", "push", "-q", "-u", "origin", "integ/p1"]])
 
+    def test_a_hand_export_with_the_default_body_never_fails_on_its_base(self):
+        """Pins every call, reads included: the default body reads from origin/<base> when the
+        base exists only on the remote, and falls back to the old body when neither exists."""
+        integrate.go(_plan(), self.ws, self.board, "main")
+        git("push", "-q", "origin", "main:release", cwd=self.repo)
+        git("fetch", "-q", "origin", cwd=self.repo)
+        push = ["git", "push", "-q", "-u", "origin", "integ/p1"]
+
+        def gh(base: str, text: str) -> list[str]:
+            head = ["--base", base, "--head", "integ/p1", "--title", "p1", "--body", text]
+            return [*GH, "pr", "create", "--draft", *head]
+
+        code, out, calls = self.recorded_export("--base", "release", reads=True)
+        self.assertEqual((code, out.strip()), (0, "https://pr/1"))
+        self.assertEqual(calls[0], ["git", "merge-base", "release", "integ/p1"])
+        self.assertEqual(calls[1], ["git", "merge-base", "origin/release", "integ/p1"])
+        self.assertEqual([c[:2] for c in calls[2:5]], [["git", "log"]] * 3)
+        self.assertEqual(calls[5:], [push, gh("release", BODY)])
+
+        code, out, calls = self.recorded_export("--base", "nowhere", reads=True)
+        self.assertEqual((code, out.strip()), (0, "https://pr/1"))
+        self.assertEqual(
+            calls,
+            [
+                ["git", "merge-base", "nowhere", "integ/p1"],
+                ["git", "merge-base", "origin/nowhere", "integ/p1"],
+                push,
+                gh("nowhere", "Dispatch plan p1."),
+            ],
+        )
+
     def test_a_hand_export_works_without_an_agent_user(self):
         """A hand export succeeds on a machine with no agent user, as the worker's has."""
         integrate.go(_plan(), self.ws, self.board, "main")

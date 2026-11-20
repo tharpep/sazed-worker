@@ -69,6 +69,16 @@ def body(plan: Plan, ws: Workspace, board: Board, start: str) -> str:
     return "\n".join(lines)
 
 
+def hand_body(plan: Plan, ws: Workspace, board: Board, base: str) -> str:
+    """The body from the local base, else origin/<base>, else the body hand exports had."""
+    for ref in (base, f"origin/{base}"):
+        try:
+            return body(plan, ws, board, base_sha(ws, ref))
+        except GitError:
+            continue
+    return f"Dispatch plan {plan.id}."
+
+
 def _git_bytes(repo: Path, *args: str) -> bytes:
     proc = subprocess.run(["git", *args], cwd=repo, capture_output=True)
     if proc.returncode != 0:
