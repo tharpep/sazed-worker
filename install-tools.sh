@@ -13,8 +13,10 @@
 #
 # ruff is already in /opt/ruff. Same SSH path as deploy.sh; safe to run again.
 set -euo pipefail
+cd "$(dirname "$0")"
 
-PROXMOX="root@192.168.50.111"
+[ -f .deploy.env ] && . ./.deploy.env
+PROXMOX="${PROXMOX_SSH:?set PROXMOX_SSH to user@host of the Proxmox host}"
 SSH_KEY="$HOME/.ssh/proxmox_media"
 VMID=110
 PACKAGES="golang-go nodejs npm node-corepack bubblewrap socat python3-poetry"

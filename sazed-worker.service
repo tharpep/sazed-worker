@@ -9,9 +9,9 @@ Wants=network-online.target
 # Don't add an explicit User=root: with NoNewPrivileges=yes, systemd then drops CAP_SETUID and the
 # worker can't switch to the agent user (Popen fails with EPERM).
 WorkingDirectory=/home/agent
-Environment=SAZED_URL=http://192.168.50.155:8000
 Environment=SAZED_AGENT_USER=agent
-# SAZED_WORKER_KEY and CLAUDE_CODE_OAUTH_TOKEN (root-only file; set with scripts/set-secret.sh)
+# SAZED_URL, SAZED_WORKER_KEY and CLAUDE_CODE_OAUTH_TOKEN (root-only file; set with
+# scripts/set-secret.sh)
 EnvironmentFile=/etc/sazed-eco/sazed-worker.env
 ExecStart=/usr/bin/python3 /opt/sazed-worker/worker.py
 Restart=always
