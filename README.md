@@ -81,6 +81,14 @@ All three routes are authenticated with `X-Worker-Key`:
 
 It copies `worker.py`, the `sazed_worker` package and the unit to CT 110 over SSH through the Proxmox host, then restarts the service. There's deliberately no GitHub runner on CT 110.
 
+No address is tracked in this repo:
+- `PROXMOX_SSH` (`user@host` of the Proxmox host) comes from the environment or an untracked `.deploy.env` beside the scripts. `deploy.sh` and `install-tools.sh` both read it.
+- `SAZED_URL` lives in `/etc/sazed-eco/sazed-worker.env` on CT 110, next to the worker key. The worker exits at startup without it, and `deploy.sh` refuses to deploy until it is there.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
 ## Setup notes
 
 - **agy:** headless runs need `read_url(*)` and `mcp(*)` in `permissions.allow` in `~worker/.gemini/antigravity-cli/settings.json`. Otherwise reading a page or calling an MCP tool is refused. Shell commands stay refused. MCP servers (such as `api-gateway`) are configured in `~worker/.gemini/config/mcp_config.json`. Its Google sign-in is cached in `~worker/.gemini/antigravity-cli/antigravity-oauth-token`.
