@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
-SAZED_URL = os.environ.get("SAZED_URL", "http://192.168.50.155:8000").rstrip("/")
+SAZED_URL = os.environ.get("SAZED_URL", "").rstrip("/")
 WORKER_KEY = os.environ.get("SAZED_WORKER_KEY", "")
 CLAUDE_TOKEN = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN", "")
 AGENT_USER = os.environ.get("SAZED_AGENT_USER", "agent")

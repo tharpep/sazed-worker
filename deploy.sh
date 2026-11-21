@@ -5,13 +5,22 @@
 #   ./deploy.sh
 #
 # Copies over SSH through the Proxmox host instead of using a GitHub runner, so CT 110 holds no
-# runner credentials. Needs ~/.ssh/proxmox_media (root on the Proxmox host). Run from Git Bash.
+# runner credentials. Needs ~/.ssh/proxmox_media (root on the Proxmox host) and PROXMOX_SSH
+# (user@host of the Proxmox host), from the environment or an untracked .deploy.env beside this
+# script. Run from Git Bash.
 set -euo pipefail
 cd "$(dirname "$0")"
 
-PROXMOX="root@192.168.50.111"
+[ -f .deploy.env ] && . ./.deploy.env
+PROXMOX="${PROXMOX_SSH:?set PROXMOX_SSH to user@host of the Proxmox host}"
 SSH_KEY="$HOME/.ssh/proxmox_media"
 VMID=110
+ENV_FILE=/etc/sazed-eco/sazed-worker.env
+
+# The unit no longer carries SAZED_URL, so a worker restarted without it in the env file would
+# exit at startup. Refuse before copying anything.
+ssh -i "$SSH_KEY" -o BatchMode=yes "$PROXMOX" "pct exec $VMID -- grep -q '^SAZED_URL=' $ENV_FILE" \
+  || { echo "refused: SAZED_URL is not set in $ENV_FILE on CT $VMID" >&2; exit 1; }
 
 python -m compileall -q worker.py sazed_worker
 tar -cf - worker.py sazed_worker/*.py sazed_worker/adapters/*.py sazed-worker.service \

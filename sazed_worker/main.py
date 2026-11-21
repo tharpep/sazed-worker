@@ -51,6 +51,8 @@ def _finish(job_id: str, payload: dict[str, Any]) -> None:
 
 
 def main() -> None:
+    if not SAZED_URL:
+        raise SystemExit("SAZED_URL is not set")
     if not WORKER_KEY:
         raise SystemExit("SAZED_WORKER_KEY is not set")
     if os.geteuid() != 0:
