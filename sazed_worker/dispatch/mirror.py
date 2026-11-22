@@ -8,6 +8,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from sazed_worker import sazed_api
 from sazed_worker.dispatch.plan import Plan, resolve
 from sazed_worker.dispatch.workspace import GitError, git
 
@@ -103,3 +104,19 @@ class Mirror:
             if getattr(plan, key):
                 body[key] = getattr(plan, key)
         self._post("/dispatch/plans", body)
+
+
+class JobMirror(Mirror):
+    """A worker job's mirror: the worker key on the worker routes, which Sazed takes only while
+    the plan's dispatch job runs. Those routes take no usage readings."""
+
+    def __init__(self, plan_id: str):
+        super().__init__(sazed_api.SAZED_URL, plan_id)
+
+    def _send(self, path: str, body: dict[str, Any]) -> None:
+        status, answer = sazed_api.post(f"/worker{path}", body, timeout=TIMEOUT_S)
+        if not 200 <= status < 300:
+            raise OSError(f"{path} answered {status}: {answer}")
+
+    def reading(self, info: dict[str, Any]) -> None:
+        pass
