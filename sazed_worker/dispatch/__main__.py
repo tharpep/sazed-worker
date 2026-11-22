@@ -2,16 +2,15 @@
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
-from sazed_worker.dispatch import integrate, mcp, pr_export, profiles, unattended
+from sazed_worker.dispatch import integrate, mcp, pr_export, profiles, session, unattended
 from sazed_worker.dispatch import plan as plans
 from sazed_worker.dispatch.board import Board
 from sazed_worker.dispatch.mirror import Mirror
 from sazed_worker.dispatch.run_agent import run_task
-from sazed_worker.dispatch.workspace import GitError, Workspace, default_home
+from sazed_worker.dispatch.workspace import GitError, default_home
 
 
 def _profiles(args: argparse.Namespace) -> int:
@@ -33,7 +32,6 @@ def _profiles(args: argparse.Namespace) -> int:
 
 NO_PROFILES = ("board", "clean")
 LAUNCHES = ("init", "run", "land", "go")
-SHARED_UMASK = 0o022
 
 
 def _load(args: argparse.Namespace, resolves: bool = True) -> tuple[plans.Plan, dict]:
@@ -72,22 +70,15 @@ def _validate(args: argparse.Namespace) -> int:
 def _context(args: argparse.Namespace):
     resolves = args.command not in NO_PROFILES
     loaded, config = _load(args, resolves)
-    problems = plans.validate(loaded, config) if resolves else []
-    if problems:
-        raise plans.PlanError("the plan doesn't validate:\n" + "\n".join(problems))
-    home = default_home(loaded.id)
-    repo = Path(args.repo).resolve()
-    if not config["unattended"]:
-        ws = Workspace(repo, loaded.id, home)
-        return loaded, config, ws, Board(home, Mirror.from_env(loaded.id))
-    ws = unattended.UnattendedWorkspace(repo, loaded.id, home, loaded.regen_outputs)
-    if args.command not in LAUNCHES:
-        return loaded, config, ws, Board(home, Mirror.from_env(loaded.id))
-    unattended.preflight(loaded, config, ws)
-    os.umask(SHARED_UMASK)
-    os.environ.update(unattended.ROOT_GIT_ENV)
-    board = Board(home, Mirror.from_env(loaded.id))
-    ws.seal()
+    ws, board = session.prepare(
+        loaded,
+        config,
+        Path(args.repo).resolve(),
+        default_home(loaded.id),
+        Mirror.from_env(loaded.id),
+        resolves=resolves,
+        launches=args.command in LAUNCHES,
+    )
     return loaded, config, ws, board
 
 
