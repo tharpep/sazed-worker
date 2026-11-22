@@ -12,10 +12,12 @@ workspace read-only except a scratch copy and a throwaway cache (no cache a late
 poisoned), no network and an empty /run (no system sockets), and a cap on processes.
 """
 
+import contextlib
 import os
 import resource
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 from . import config
@@ -36,13 +38,15 @@ def run_jailed(
     env: dict[str, str] | None = None,
     untrusted_writable: list[Path] | None = None,
     read_only: list[Path] | None = None,
+    watch: Callable[[subprocess.Popen], contextlib.AbstractContextManager] | None = None,
 ) -> tuple[int | None, str, str]:
     """(exit code, stdout, stderr) of cmd run in the jail with `root` (the job's workspace)
     writable; exit code None if it couldn't run or finish.
 
     With `untrusted_writable` (the test run): only those paths are writable, there's no network
     and no /run, and the process count is capped. `read_only` paths are bound read-only last, so
-    they stay read-only inside a writable path and stay visible under the agent's home."""
+    they stay read-only inside a writable path and stay visible under the agent's home.
+    `watch` wraps the wait, so its caller can kill the process group early."""
     if not Path(BWRAP).exists():
         return None, "", "bubblewrap isn't installed"
     home = home_for(root)
@@ -86,7 +90,8 @@ def run_jailed(
     except OSError as e:
         return None, "", str(e)
     try:
-        out, err = proc.communicate(timeout=timeout)
+        with watch(proc) if watch else contextlib.nullcontext():
+            out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         kill_group(proc)
         return None, "", f"{Path(cmd[0]).name} timed out"

@@ -1,5 +1,6 @@
 """One dispatch task start to exit: a `claude -p` run in its own worktree, under its guardrails."""
 
+import contextlib
 import json
 import os
 import queue
@@ -15,6 +16,7 @@ from sazed_worker.adapters.contract import RunSpec
 from sazed_worker.dispatch import mcp, unattended
 from sazed_worker.dispatch import settings as agent_settings
 from sazed_worker.dispatch.board import RED, Board
+from sazed_worker.dispatch.halt import Halt
 from sazed_worker.dispatch.mirror import Mirror
 from sazed_worker.dispatch.plan import Plan, Task, could_overlap, resolve
 from sazed_worker.dispatch.steps import StepSender
@@ -256,7 +258,12 @@ def unattended_spec(
 
 
 def run_task(
-    plan: Plan, task: Task, ws: Workspace, board: Board, config: dict[str, Any] | None = None
+    plan: Plan,
+    task: Task,
+    ws: Workspace,
+    board: Board,
+    config: dict[str, Any] | None = None,
+    halt: Halt | None = None,
 ) -> dict[str, Any]:
     config = config or {}
     cfg = resolve(task, config)
@@ -290,7 +297,9 @@ def run_task(
             spec = unattended_spec(
                 cfg, worktree, prompt, settings_path, mcp_config, read_only, agent_env, stderr_path
             )
-            return _launch(task, ws, board, cfg, spec, run_dir, mcp.Grant(), read_only, True)
+            return _launch(
+                task, ws, board, cfg, spec, run_dir, mcp.Grant(), read_only, True, halt
+            )
         finally:
             shutil.rmtree(ws.claude_config(run_dir), ignore_errors=True)
     settings_path = agent_settings.build(
@@ -301,7 +310,7 @@ def run_task(
     spec = task_spec(
         cfg, worktree, prompt, settings_path, read_only, granted, task_env, stderr_path
     )
-    return _launch(task, ws, board, cfg, spec, run_dir, granted, read_only, False)
+    return _launch(task, ws, board, cfg, spec, run_dir, granted, read_only, False, halt)
 
 
 def _launch(
@@ -314,6 +323,7 @@ def _launch(
     granted: mcp.Grant,
     read_only: bool,
     unattended_run: bool,
+    halt: Halt | None = None,
 ) -> dict[str, Any]:
     """Write the running row, run the agent, and write the row it finished with."""
     worktree = spec.cwd
@@ -324,7 +334,7 @@ def _launch(
         worktree=str(worktree),
         profile=cfg["profile"],
     )
-    outcome = _run(spec, run_dir / "agent.jsonl", board.mirror, task.id)
+    outcome = _run(spec, run_dir / "agent.jsonl", board.mirror, task.id, halt)
     evidence_required = bool(cfg.get("evidence_required"))
     return _finish(task, ws, board, outcome, spec, read_only, evidence_required, unattended_run)
 
@@ -434,15 +444,26 @@ class TaskSink:
         return False
 
 
-def _run(spec: RunSpec, log: Path, mirror: Mirror | None = None, task: str = "") -> dict[str, Any]:
+def _run(
+    spec: RunSpec,
+    log: Path,
+    mirror: Mirror | None = None,
+    task: str = "",
+    halt: Halt | None = None,
+) -> dict[str, Any]:
     sink = TaskSink(log, mirror, task, str(spec.cwd))
     run = Run(sink, f"task {task}", drain_s=DRAIN_S)
     try:
-        code = run.run(spec)
+        with halt.over(run.stop) if halt else contextlib.nullcontext():
+            code = run.run(spec)
     except BaseException:
         sink.close()
         raise
+    halted = halt.row() if halt and run.stop_reason == halt.reason else None
+    if halt and run.stop_reason == "rate_limit":
+        halt.stop("rate_limit", run.rate_limited)
     return {
+        "halted": halted,
         "code": code,
         "stop_reason": run.stop_reason,
         "rate_limited": run.rate_limited,
@@ -485,6 +506,9 @@ def _finish(
     def failed(line: str, reason: str) -> dict[str, Any]:
         return board.write(task.id, "failed", line, reason=reason, **common)
 
+    if outcome.get("halted"):
+        state, reason, line = outcome["halted"]
+        return board.write(task.id, state, line, reason=reason, **common)
     if stopped == "timed_out":
         line = f"timed out after {spec.timeout_s} s"
         return board.write(task.id, "timed_out", line, reason="timeout", **common)

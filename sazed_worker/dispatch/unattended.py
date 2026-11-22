@@ -11,8 +11,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sazed_worker import config
+from sazed_worker.agent_process import kill_group
 from sazed_worker.config import BWRAP
 from sazed_worker.dispatch import mcp, profiles
+from sazed_worker.dispatch.halt import Halt
 from sazed_worker.dispatch.plan import Plan, Task, resolve
 from sazed_worker.dispatch.rules import edit_reason, folded, glob_match
 from sazed_worker.dispatch.workspace import GitError, Landing, Workspace, git
@@ -229,6 +231,7 @@ class UnattendedWorkspace(Workspace):
     ):
         super().__init__(repo, plan_id, home)
         self.regen_outputs = list(regen_outputs)
+        self.halt: Halt | None = None
 
     def guard(self, d: Path) -> tuple[str, ...]:
         return (
@@ -310,10 +313,15 @@ class UnattendedWorkspace(Workspace):
             check_env(scratch),
             [cwd, scratch],
             self.shielded(cwd),
+            self._stoppable if self.halt else None,
         )
         if code is None:
             return -1, err.strip()[-1500:]
         return code, (out + err)[-1500:]
+
+    def _stoppable(self, proc: subprocess.Popen):
+        assert self.halt
+        return self.halt.over(lambda _: kill_group(proc))
 
     def _cleanup_hooks(self, task_dir: Path) -> None:
         """Nothing: agy never runs unattended, and root never follows a path the agent made."""

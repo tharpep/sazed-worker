@@ -8,6 +8,7 @@ from typing import Any
 
 from sazed_worker.dispatch import pr_export
 from sazed_worker.dispatch.board import RED, Board
+from sazed_worker.dispatch.halt import Halt
 from sazed_worker.dispatch.plan import Plan, Task, resolve
 from sazed_worker.dispatch.rules import glob_match
 from sazed_worker.dispatch.run_agent import refusal, run_task, unready_deps
@@ -67,12 +68,18 @@ def init(
 
 
 def land(
-    plan: Plan, ws: Workspace, board: Board, config: dict[str, Any] | None = None
+    plan: Plan,
+    ws: Workspace,
+    board: Board,
+    config: dict[str, Any] | None = None,
+    halt: Halt | None = None,
 ) -> list[dict[str, Any]]:
     """Land every done code task whose dependencies landed, in order; stop at the first red."""
     config = config or {}
     rows = []
     for task in order(plan):
+        if halt and halt.reason:
+            break
         cfg = resolve(task, config)
         if cfg["read_only"] or board.state(task.id) != "done":
             continue
@@ -86,6 +93,13 @@ def land(
             rows.append(board.write(task.id, "failed", line, reason="left_owns"))
             break
         landing = ws.land(task.id, _check(plan, task, config), plan.regen, int(cfg["timeout_s"]))
+        killable = landing.reason in ("check_failed", "regen_failed")
+        stopped = halt.row() if halt and killable else None
+        if stopped:
+            # A check the stop killed says nothing about the work, so it is not check_failed.
+            state, reason, line = stopped
+            rows.append(board.write(task.id, state, line, reason=reason))
+            break
         rows.append(
             board.write(
                 task.id, landing.state, landing.line, ref=landing.ref, reason=landing.reason
@@ -103,9 +117,18 @@ def go(
     base: str,
     config: dict[str, Any] | None = None,
     parallel: int = 3,
+    halt: Halt | None = None,
 ) -> dict[str, str]:
-    """Run every ready task, land what finished, repeat until nothing moves."""
+    """Run every ready task, land what finished, repeat until nothing moves or a stop."""
     config = config or {}
+
+    def halted() -> bool:
+        return bool(halt and halt.reason)
+
+    def start(task: Task) -> None:
+        if not halted():
+            run_task(plan, task, ws, board, config, halt)
+
     init(plan, ws, board, base, config)
     while True:
         states = {t.id: board.state(t.id) for t in plan.tasks}
@@ -116,11 +139,11 @@ def go(
         ]
         if ready:
             with ThreadPoolExecutor(max_workers=parallel) as pool:
-                list(pool.map(lambda t: run_task(plan, t, ws, board, config), ready))
-        landed = land(plan, ws, board, config)
+                list(pool.map(start, ready))
+        landed = land(plan, ws, board, config, halt)
         moved = bool(ready) or any(r["state"] == "landed" for r in landed)
         red = any(r["state"] in RED for r in landed)
-        if red or not moved:
+        if red or not moved or halted():
             return {t.id: board.state(t.id) or "not started" for t in plan.tasks}
 
 
