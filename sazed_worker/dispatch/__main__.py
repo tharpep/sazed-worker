@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from sazed_worker.dispatch import integrate, mcp, pr_export, profiles, session, unattended
+from sazed_worker.dispatch import integrate, mcp, pr_export, profiles, session, submit, unattended
 from sazed_worker.dispatch import plan as plans
 from sazed_worker.dispatch.board import Board
 from sazed_worker.dispatch.mirror import Mirror
@@ -189,6 +189,9 @@ def main(argv: list[str] | None = None) -> int:
     exp.add_argument("--no-pr", action="store_true", help="push only")
     command("sync", "post the plan and every board row to Sazed")
     command("clean", "remove the plan's worktrees and task branches")
+    sent = sub.add_parser("submit", help="send a plan to Sazed as a job Pryce must approve")
+    submit.add_arguments(sent)
+    sent.set_defaults(func=submit.submit)
     args = parser.parse_args(argv)
     return args.func(args)
 
