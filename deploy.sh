@@ -23,15 +23,17 @@ ssh -i "$SSH_KEY" -o BatchMode=yes "$PROXMOX" "pct exec $VMID -- grep -q '^SAZED
   || { echo "refused: SAZED_URL is not set in $ENV_FILE on CT $VMID" >&2; exit 1; }
 
 python -m compileall -q worker.py sazed_worker
-tar -cf - worker.py sazed_worker/*.py sazed_worker/adapters/*.py sazed-worker.service \
+find sazed_worker -name '*.py' -not -path '*/__pycache__/*' -print0 \
+  | tar -cf - --null -T - worker.py sazed-worker.service \
   | ssh -i "$SSH_KEY" -o BatchMode=yes \
   "$PROXMOX" "pct exec $VMID -- sh -c 'set -e
 mkdir -p /opt/sazed-worker
 rm -rf /opt/sazed-worker/sazed_worker
 tar --no-same-owner -xf - -C /opt/sazed-worker
-chmod 755 /opt/sazed-worker/sazed_worker /opt/sazed-worker/sazed_worker/adapters
-chmod 644 /opt/sazed-worker/worker.py /opt/sazed-worker/sazed_worker/*.py \
-  /opt/sazed-worker/sazed_worker/adapters/*.py
+chmod 755 /opt/sazed-worker
+chmod 644 /opt/sazed-worker/worker.py
+find /opt/sazed-worker/sazed_worker -type d -exec chmod 755 {} +
+find /opt/sazed-worker/sazed_worker -type f -exec chmod 644 {} +
 mv /opt/sazed-worker/sazed-worker.service /etc/systemd/system/sazed-worker.service
 systemctl daemon-reload
 systemctl enable --quiet sazed-worker

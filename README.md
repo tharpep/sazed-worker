@@ -26,7 +26,7 @@ It runs one job at a time and uses only the Python standard library.
 | `jail`, `deps`, `tests` | bubblewrap jail for dependency installs, checks and tests; dependency setup; the repo's tests run by the worker |
 | `jobs` | one job from start to its finish payload |
 | `main` | the claim loop and workspace cleanup |
-| `dispatch` | the graph engine's local mode (My-AI plans/17): `probe` writes `CAPABILITIES.md` from headless `claude -p` runs; `rules`, `hook` and `settings` are the agent guardrails, a deny rule and a hook for each refusal; `plan` loads a plan, resolves each task's profile and refuses a bad plan in code; `workspace` (every git call), `board`, `run_agent`, `fake_agent` and `integrate` run a plan: `python -m sazed_worker.dispatch validate|init|run|land|go|board|export|clean plan.json` |
+| `dispatch` | the graph engine's local mode (My-AI plans/17): `probe` writes `CAPABILITIES.md` from headless `claude -p` runs; `rules`, `hook` and `settings` are the agent guardrails, a deny rule and a hook for each refusal; `plan` loads a plan, resolves each task's profile and refuses a bad plan in code; `workspace` (every git call), `board`, `run_agent`, `fake_agent` and `integrate` run a plan: `python -m sazed_worker.dispatch validate|init|run|land|go|board|export|clean plan.json`; `submit` sends a plan to Sazed as a job Pryce must approve, and `job` runs an approved one (below) |
 
 ## How it runs
 
@@ -62,14 +62,20 @@ It runs one job at a time and uses only the Python standard library.
 - **Repo instructions:** `--setting-sources=user` doesn't load a repo's CLAUDE.md, so a fresh review or change session gets the checkout's CLAUDE.md and REVIEW.md (capped) at the top of its prompt.
   - The gateway's GitHub App commits them on `sazed/<job-id>` and opens the PR. Nothing here can push.
 - **Private repos:** they clone with a read-only, single-repo token that Sazed gets from the gateway for the job. git reads it through a credential helper that takes it from the environment, so it never appears in argv or `.git/config`. (An `http.extraheader` with Basic auth didn't work with GitHub's newer long tokens.)
+- **Dispatch jobs** (`dispatch/job.py`, kind `dispatch`): one approved plan, run unattended.
+  - The plan and its config ride in the job's params with their sha256. The worker recomputes it and refuses a mismatch before it clones or writes anything.
+  - The checkout, the plan and `DISPATCH_HOME` sit in `~/jobs/<job-id>`, owned by root. The agent user can pass through that folder and cannot list or change it.
+  - Budgets are resolved again at the start. A task cap over the approved one refuses the job before any task starts.
+  - A cancel, the plan's wall-clock cap or a shutdown kills the agents and any running check, and starts nothing else.
+  - Rows, beats and steps go to Sazed's `/worker/dispatch/*` routes with the worker key and `X-Dispatch-Job`. The draft PR is opened by Sazed's export route, never pushed.
 - **Hard limits per job:** a wall-clock timeout and a cap on tool calls. The worker kills the agent's whole process group past either one.
 - **Empty answers:** agy can end empty when its last step was a tool that headless mode refused. The worker then resumes the same conversation once and asks for an answer from what it already found.
 - **Workspaces:** `~/jobs/<job-id>`, kept 14 days so follow-up jobs can resume a session.
 
 ## Sazed API it uses
 
-All three routes are authenticated with `X-Worker-Key`:
-- `POST /worker/claim` returns `204` when there is nothing to do, otherwise the job.
+The job routes are authenticated with `X-Worker-Key`:
+- `POST /worker/claim` sends the kinds this worker runs, and returns `204` when there is nothing to do, otherwise the job.
 - `POST /worker/jobs/{id}/events` stores streamed events. It doubles as the heartbeat and answers `{"cancel": true}` if the job was cancelled. While the worker runs checks or tests itself (no agent streaming), it posts an empty batch every 20 s so Sazed doesn't time the job out after its 120 s grace.
 - `POST /worker/jobs/{id}/finish` takes a status (`succeeded`, `failed` or `timed_out`), the result or error, the agent's session id, and meta (tools used, usage).
 
