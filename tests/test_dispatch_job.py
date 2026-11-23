@@ -4,13 +4,16 @@ import contextlib
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unittest
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from unittest import mock
 
 from sazed_worker import config as worker_config
@@ -74,8 +77,7 @@ class JobCase(Case):
         self.source = self.tmp / "o" / "r"
         self.source.parent.mkdir()
         self.repo.rename(self.source)
-        self.jobs_dir = self.tmp / "jobs"
-        self.jobs_dir.mkdir()
+        self.jobs_dir = self.make_jobs_dir()
         self.record = self.tmp / "agent-env.jsonl"
         self.record.touch()
         self.record.chmod(0o666)
@@ -110,6 +112,11 @@ class JobCase(Case):
         self.unprivileged()
         self.job_id = str(uuid.uuid4())
         self.job_dir = self.jobs_dir / self.job_id
+
+    def make_jobs_dir(self) -> Path:
+        path = self.tmp / "jobs"
+        path.mkdir()
+        return path
 
     def unprivileged(self) -> None:
         self.as_unprivileged_agent()
@@ -500,10 +507,15 @@ class EndToEnd(JobCase, HappyPath):
 class AsRoot(JobCase, HappyPath):
     """Run as root in WSL with SAZED_AGENT_USER naming an ordinary user (never in CI)."""
 
+    def make_jobs_dir(self) -> Path:
+        """As on the worker host: inside the agent's home, which every jail hides."""
+        path = Path(tempfile.mkdtemp(prefix="dispatch-jobs-", dir=worker_config.AGENT_HOME))
+        self.addCleanup(shutil.rmtree, path, ignore_errors=True)
+        os.chown(path, worker_config.AGENT_UID, worker_config.AGENT_GID)
+        return path
+
     def unprivileged(self) -> None:
-        for path in (self.tmp, self.jobs_dir):
-            path.chmod(0o755)
-        os.chown(self.jobs_dir, worker_config.AGENT_UID, worker_config.AGENT_GID)
+        self.tmp.chmod(0o755)
 
     def test_the_job_runs_behind_the_real_preflight_with_a_root_owned_clone(self):
         self.no_secret_reaches_an_agent_or_the_jail()
