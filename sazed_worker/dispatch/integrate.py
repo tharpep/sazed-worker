@@ -156,6 +156,7 @@ def export(
     body: str | None,
     config: dict[str, Any] | None = None,
     open_pr: bool = True,
+    plan_hash: str | None = None,
 ) -> str:
     """Open one draft PR of integ/<plan> into base; never merges, never targets main. By hand
     it pushes and runs gh; unattended it sends the changed files to Sazed and pushes nothing."""
@@ -177,7 +178,10 @@ def export(
     if unattended:
         start = pr_export.base_sha(ws, base)
         body = body or pr_export.body(plan, ws, board, start)
-        return pr_export.send(plan.id, pr_export.request(ws, base, start, title, body))
+        payload = pr_export.request(ws, base, start, title, body)
+        if plan_hash:
+            payload["plan_hash"] = plan_hash
+        return pr_export.send(plan.id, payload)
     if open_pr and not body:
         body = pr_export.hand_body(plan, ws, board, base)
     branch = ws.export()

@@ -473,7 +473,7 @@ def _run(
     }
 
 
-def _limit_line(limited: dict[str, Any] | None) -> str:
+def limit_line(limited: dict[str, Any] | None) -> str:
     limited = limited or {}
     window = (limited.get("window") or "usage").replace("_", " ")
     line = f"hit Pryce's {window} plan limit"
@@ -515,7 +515,7 @@ def _finish(
     if stopped == "tool_cap":
         return failed(f"hit the tool cap of {spec.max_tool_calls} calls", "tool_cap")
     if stopped == "rate_limit":
-        return failed(_limit_line(outcome["rate_limited"]), "plan_limit")
+        return failed(limit_line(outcome["rate_limited"]), "plan_limit")
     if stopped in STOPPED:
         return failed(*STOPPED[stopped])
     if not outcome["result"]:

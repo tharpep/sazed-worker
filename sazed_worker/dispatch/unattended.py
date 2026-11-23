@@ -208,6 +208,14 @@ def _storable(root: Path, rel: str) -> bool:
     return stat.S_ISREG(mode) or stat.S_ISLNK(mode)
 
 
+def interface_refusal(plan: Plan, repo: Path) -> str | None:
+    """Why root cannot write an interface file: the repository holds a link in its way."""
+    for rel in plan.interface_files:
+        if not _storable(repo, rel) or (repo / rel).is_symlink():
+            return f"interface file {rel!r} is not a plain file in the repository"
+    return None
+
+
 def _regen_may_write(rel: str) -> bool:
     parts = tuple(folded(p) for p in PurePosixPath(rel).parts)
     return parts[0] not in REGEN_NEVER_TOP and not set(parts) & set(REGEN_NEVER_ANYWHERE)

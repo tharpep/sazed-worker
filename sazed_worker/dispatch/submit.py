@@ -37,7 +37,7 @@ def _read(args: argparse.Namespace) -> tuple[dict[str, Any], plans.Plan, dict[st
         raise SubmitRefused(f"there is no config at {args.config}")
     try:
         raw = json.loads(Path(args.plan).read_text())
-        plan = plans.load(Path(args.plan))
+        plan = plans.parse(raw)
         config = plans.load_config(Path(args.config) if args.config else None)
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
         raise SubmitRefused(f"can't read the plan: {e}") from e

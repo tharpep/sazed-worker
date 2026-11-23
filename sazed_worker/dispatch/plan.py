@@ -49,7 +49,10 @@ _TASK_KEYS = {"id", "goal", "done", "owns", "depends_on", "check", "profile"}
 
 
 def load(path: Path) -> Plan:
-    data = json.loads(path.read_text())
+    return parse(json.loads(path.read_text()))
+
+
+def parse(data: dict[str, Any]) -> Plan:
     tasks = []
     for raw in data.get("tasks", []):
         known = {k: raw[k] for k in _TASK_KEYS if k in raw}

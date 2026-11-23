@@ -1,10 +1,12 @@
 """Job workspaces and repo checkouts: git as the agent user, and the agent's working copy."""
 
+import contextlib
 import os
 import re
 import shutil
 import subprocess
 import uuid
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,7 @@ from .config import AGENT_GID, AGENT_UID, AGENT_USER, JOBS_DIR
 from .scrub import extra_secrets
 
 _REPO_RE = re.compile(r"^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$")
+_BASE_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$")
 
 _CREDENTIAL_HELPER = (
     '!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f'
@@ -26,17 +29,31 @@ def git(*args: str, cwd: Path | None = None, timeout: int = 180,
     A token (read-only, one repo, from the gateway's GitHub App) goes in via environment config,
     not argv, so it never shows in a process listing.
     """
-    env = agent_env()
-    if token:
-        # A credential helper reading the token from the environment. (An http.extraheader with
-        # Basic auth was ignored for GitHub's newer long installation tokens.) Nothing is written
-        # to .git/config.
-        env |= {
-            "GIT_TOKEN": token,
-            "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": "credential.https://github.com.helper",
-            "GIT_CONFIG_VALUE_0": _CREDENTIAL_HELPER,
-        }
+    return _run_git(args, cwd, agent_env() | _token_env(token), timeout, as_agent())
+
+
+def _token_env(token: str | None) -> dict[str, str]:
+    if not token:
+        return {}
+    # A credential helper reading the token from the environment. (An http.extraheader with
+    # Basic auth was ignored for GitHub's newer long installation tokens.) Nothing is written
+    # to .git/config.
+    return {
+        "GIT_TOKEN": token,
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "credential.https://github.com.helper",
+        "GIT_CONFIG_VALUE_0": _CREDENTIAL_HELPER,
+    }
+
+
+def _run_git(
+    args: tuple[str, ...],
+    cwd: Path | None,
+    env: Mapping[str, str],
+    timeout: int,
+    user: dict[str, Any],
+    watch: Callable[[subprocess.Popen], contextlib.AbstractContextManager] | None = None,
+) -> str:
     proc = subprocess.Popen(
         ["git", "-c", "core.hooksPath=/dev/null", *args],
         cwd=cwd,
@@ -45,16 +62,51 @@ def git(*args: str, cwd: Path | None = None, timeout: int = 180,
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
-        **as_agent(),
+        **user,
     )
     try:
-        out, err = proc.communicate(timeout=timeout)
+        with watch(proc) if watch else contextlib.nullcontext():
+            out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         kill_group(proc)
         raise JobFailed(f"git {args[0]} timed out") from None
     if proc.returncode != 0:
         raise JobFailed(f"git {args[0]} failed: {err.strip()[-500:]}")
     return out
+
+
+def clone_url(repo: str) -> str:
+    if not _REPO_RE.fullmatch(repo):
+        raise JobFailed(f"invalid repo '{repo}'")
+    return f"https://github.com/{repo}.git"
+
+
+def clone_as_caller(
+    url: str,
+    base: str,
+    dest: Path,
+    token: str | None,
+    git_env: Mapping[str, str],
+    watch: Callable[[subprocess.Popen], contextlib.AbstractContextManager] | None = None,
+) -> None:
+    """Clone base for this process's own user (root), so agents can read it and never write
+    it. The environment is built here, so neither the worker key nor the Claude token is in
+    it."""
+    if not _BASE_RE.fullmatch(base):
+        raise JobFailed(f"invalid base '{base}'")
+    if token:
+        extra_secrets.add(token)
+    env = {
+        "HOME": str(dest.parent),
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "GIT_TERMINAL_PROMPT": "0",
+        # The folders above belong to the agent, so root must never find a repository there.
+        "GIT_CEILING_DIRECTORIES": str(dest.parent.parent),
+    }
+    args = ("clone", "--depth", "50", "--single-branch", "--no-tags", "--branch", base, "--",
+            url, str(dest))
+    _run_git(args, dest.parent, env | git_env | _token_env(token), 180, {}, watch)
 
 
 def workspace(job_id: str) -> Path:
