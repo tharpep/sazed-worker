@@ -23,6 +23,8 @@ from .jobs import run_job
 from .sazed_api import post
 from .scrub import extra_secrets
 
+KINDS = ("research", "second_opinion", "code_task", "dispatch")
+
 
 def _agents() -> list[str]:
     return adapters.available()
@@ -70,7 +72,8 @@ def main() -> None:
         if time.time() - last_cleanup > 3600:
             _cleanup_workspaces()
             last_cleanup = time.time()
-        status, job = post("/worker/claim", {"agents": _agents(), "worker": hostname})
+        claim = {"agents": _agents(), "worker": hostname, "kinds": list(KINDS)}
+        status, job = post("/worker/claim", claim)
         if status != 200 or not isinstance(job, dict):
             if status not in (200, 204):
                 log.warning("claim returned %s: %s", status, job)

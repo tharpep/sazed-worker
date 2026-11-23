@@ -13,6 +13,7 @@ from sazed_worker.dispatch import plan as plans
 from sazed_worker.dispatch.pr_export import SAZED_MAX_TITLE
 
 TIMEOUT_S = 60
+SAZED_MAX_SUBMIT_BYTES = 1024 * 1024
 
 
 class SubmitRefused(RuntimeError):
@@ -113,6 +114,8 @@ def submit(args: argparse.Namespace) -> int:
             digest = admission.plan_hash(body["plan"], body["config"])
         except (TypeError, ValueError) as e:
             raise SubmitRefused(f"the plan or config holds a value JSON can't carry: {e}") from e
+        if len(data) > SAZED_MAX_SUBMIT_BYTES:
+            raise SubmitRefused(f"the plan is {len(data)} bytes encoded, over Sazed's 1 MiB")
         answer = _post(f"/dispatch/plans/{body['plan']['id']}/submit", data)
     except (SubmitRefused, plans.PlanError, profiles.ProfilesError) as e:
         print(f"refused: {e}")

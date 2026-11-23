@@ -176,12 +176,13 @@ def _refusal(answer: Any) -> tuple[str, str | None]:
     return str(detail if detail is not None else answer), data.get("reason")
 
 
-def send(plan_id: str, payload: dict[str, Any]) -> str:
+def send(plan_id: str, payload: dict[str, Any], job_id: str | None = None) -> str:
     """POST the request to Sazed with the worker key; the PR URL, or ExportRefused."""
     from sazed_worker import sazed_api  # pinned by test_a_hand_export_works_without_an_agent_user
 
     path = f"/worker/dispatch/plans/{plan_id}/export"
-    status, answer = sazed_api.post(path, payload, timeout=SAZED_TIMEOUT_S)
+    headers = sazed_api.job_header(job_id) if job_id else None
+    status, answer = sazed_api.post(path, payload, SAZED_TIMEOUT_S, headers)
     if 200 <= status < 300:
         if not (isinstance(answer, dict) and isinstance(answer.get("url"), str)):
             raise ExportUnclear(

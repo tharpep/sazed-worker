@@ -168,6 +168,7 @@ class Submit(unittest.TestCase):
         self.refused(plan=PLAN | {"interface_files": {"../x": ""}}, says="interface file")
         self.refused(config="day = 2026-11-22\n", says="JSON can't carry")
         self.refused(config="check = nan\n", says="JSON can't carry")
+        self.refused(plan=PLAN | {"interface_files": {"a": "x" * 2**20}}, says="1 MiB")
         self.refused("--title", "t" * 257, says="the title is over 256")
         self.refused("--config", str(self.tmp / "absent.toml"), says="there is no config")
         self.assertEqual(self.server.seen, [])

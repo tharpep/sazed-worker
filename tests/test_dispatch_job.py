@@ -15,6 +15,7 @@ from unittest import mock
 
 from sazed_worker import config as worker_config
 from sazed_worker import jobs, sazed_api, scrub
+from sazed_worker import main as main_module
 from sazed_worker import repo as repo_module
 from sazed_worker.agent_process import JobFailed
 from sazed_worker.config import stop
@@ -167,6 +168,35 @@ class Routing(unittest.TestCase):
                 ):
                     jobs.run_job({"id": "x", "kind": kind, "agent": "claude"})
         self.assertEqual(handler.call_count, 1)
+
+
+    def test_the_claim_names_the_kinds_this_worker_runs(self):
+        """A8: Sazed gives a dispatch job only to a worker that lists the kind."""
+        bodies = []
+
+        def post(path, body):
+            bodies.append((path, body))
+            stop.set()
+            return 204, None
+
+        self.addCleanup(stop.clear)
+        with (
+            mock.patch.object(main_module, "post", post),
+            mock.patch.object(main_module, "SAZED_URL", "http://s.test"),
+            mock.patch.object(main_module, "WORKER_KEY", "k"),
+            mock.patch.object(main_module.os, "geteuid", return_value=0),
+            mock.patch.object(main_module, "JOBS_DIR"),
+            mock.patch.object(main_module.shutil, "chown"),
+            mock.patch.object(main_module.signal, "signal"),
+            mock.patch.object(main_module.limits, "probe"),
+            mock.patch.object(main_module, "_cleanup_workspaces"),
+        ):
+            main_module.main()
+        ((path, body),) = bodies
+        self.assertEqual(path, "/worker/claim")
+        self.assertEqual(body["kinds"],
+                         ["research", "second_opinion", "code_task", "dispatch"])
+        self.assertEqual(sorted(body), ["agents", "kinds", "worker"])
 
 
 class Refused(JobCase):
@@ -407,6 +437,8 @@ class HappyPath:
         for path, headers, _ in self.server.seen:
             self.assertTrue(path.startswith("/worker/"), path)
             self.assertEqual(headers["X-Worker-Key"], WORKER_KEY)
+            if path.startswith("/worker/dispatch/"):
+                self.assertEqual(headers["X-Dispatch-Job"], self.job_id)
             self.assertNotIn(CONSOLE_KEY, str(headers))
 
     def no_secret_reaches_an_agent_or_the_jail(self) -> None:
@@ -445,11 +477,16 @@ class EndToEnd(JobCase, HappyPath):
 
     def test_an_export_sazed_refuses_fails_the_job_with_its_reason(self):
         self.modes(api="noshell")
-        self.server.export = (403, {"detail": {"detail": "not approved", "reason": "refused"}})
-        payload = self.finish(self.job(tasks=("api",)))
-        self.assertEqual((payload["status"], payload["meta"]["reason"], payload["error"]),
-                         ("failed", "refused", "not approved"))
-        self.assertEqual(payload["meta"]["tasks"], {"api": "landed"})
+        for reason in ("refused", "left_owns"):
+            with self.subTest(reason=reason):
+                self.job_id = str(uuid.uuid4())
+                self.server.export = (403, {"detail": "not approved", "reason": reason})
+                payload = self.finish(self.job(tasks=("api",)))
+                self.assertEqual(
+                    (payload["status"], payload["meta"]["reason"], payload["error"]),
+                    ("failed", reason, "not approved"),
+                )
+                self.assertEqual(payload["meta"]["tasks"], {"api": "landed"})
 
     def test_a_base_that_moved_is_said_in_the_result_only(self):
         self.modes(api="noshell")

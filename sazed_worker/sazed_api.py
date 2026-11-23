@@ -9,12 +9,18 @@ from .config import SAZED_URL, WORKER_KEY
 from .scrub import scrub
 
 
-def post(path: str, body: dict[str, Any], timeout: float = 30) -> tuple[int, Any]:
+def post(
+    path: str,
+    body: dict[str, Any],
+    timeout: float = 30,
+    headers: dict[str, str] | None = None,
+) -> tuple[int, Any]:
     """POST to Sazed. Never raises: network or decode failures come back as status 0."""
     req = urllib.request.Request(
         f"{SAZED_URL}{path}",
         data=scrub(json.dumps(body)).encode(),
-        headers={"Content-Type": "application/json", "X-Worker-Key": WORKER_KEY},
+        headers=(headers or {})
+        | {"Content-Type": "application/json", "X-Worker-Key": WORKER_KEY},
         method="POST",
     )
     status, raw = _send(req, timeout)
@@ -24,6 +30,11 @@ def post(path: str, body: dict[str, Any], timeout: float = 30) -> tuple[int, Any
         return status, json.loads(raw) if raw else None
     except ValueError as e:
         return 0, f"{type(e).__name__}: {e}"
+
+
+def job_header(job_id: str) -> dict[str, str]:
+    """Names the running dispatch job a worker-key write belongs to (D7 A1)."""
+    return {"X-Dispatch-Job": job_id}
 
 
 def get(

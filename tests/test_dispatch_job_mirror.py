@@ -59,26 +59,28 @@ class JobMirroring(unittest.TestCase):
         mirror.reading({"unifiedWindows": {}})
 
     def test_everything_but_readings_goes_to_the_worker_routes_with_the_worker_key(self):
-        self.send_all(JobMirror("p1"))
+        self.send_all(JobMirror("p1", "job-1"))
         self.assertEqual(
             [path for path, _, _ in self.worker.seen],
             [f"/worker/dispatch/{r}" for r in ("plans", "rows", "heartbeat", "steps")],
         )
         for _, headers, _ in self.worker.seen:
             self.assertEqual(headers["X-Worker-Key"], "worker-key-abc")
+            self.assertEqual(headers["X-Dispatch-Job"], "job-1")
             self.assertNotIn("console-key-abc", str(headers))
         self.assertEqual(self.console.seen, [])
 
     def test_the_bodies_are_the_hand_mirror_s(self):
-        self.send_all(JobMirror("p1"))
+        self.send_all(JobMirror("p1", "job-1"))
         self.send_all(Mirror.from_env("p1"))
+        self.assertNotIn("X-Dispatch-Job", str(self.console.seen))
         hand = [(p, b) for p, _, b in self.console.seen if p != "/claude-usage/readings"]
         self.assertEqual([(f"/worker{p}", b) for p, b in hand],
                          [(p, b) for p, _, b in self.worker.seen])
 
     def test_a_refusing_sazed_never_stops_the_run_and_settled_rows_are_still_tried(self):
         self.worker.status = 403
-        mirror = JobMirror("p1")
+        mirror = JobMirror("p1", "job-1")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             mirror.row({"state": "running", "task": "a"})

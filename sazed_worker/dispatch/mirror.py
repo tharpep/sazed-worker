@@ -110,11 +110,12 @@ class JobMirror(Mirror):
     """A worker job's mirror: the worker key on the worker routes, which Sazed takes only while
     the plan's dispatch job runs. Those routes take no usage readings."""
 
-    def __init__(self, plan_id: str):
+    def __init__(self, plan_id: str, job_id: str):
         super().__init__(sazed_api.SAZED_URL, plan_id)
+        self.headers = sazed_api.job_header(job_id)
 
     def _send(self, path: str, body: dict[str, Any]) -> None:
-        status, answer = sazed_api.post(f"/worker{path}", body, timeout=TIMEOUT_S)
+        status, answer = sazed_api.post(f"/worker{path}", body, TIMEOUT_S, self.headers)
         if not 200 <= status < 300:
             raise OSError(f"{path} answered {status}: {answer}")
 

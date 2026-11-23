@@ -255,7 +255,7 @@ class DispatchJob:
         mcp.load(unattended=True)
         home = job_dir / "dispatch" / plan.id
         ws, self.board = session.prepare(
-            plan, self.settings, checkout, home, JobMirror(plan.id)
+            plan, self.settings, checkout, home, JobMirror(plan.id, self.id)
         )
         assert isinstance(ws, unattended.UnattendedWorkspace)
         ws.halt = self.halt
@@ -271,7 +271,7 @@ class DispatchJob:
         body = "\n\n".join(part for part in (work.body, generated) if part)
         return integrate.export(
             plan, ws, self.board, work.base, work.title, body, self.settings,
-            plan_hash=work.plan_hash,
+            plan_hash=work.plan_hash, job_id=self.id,
         )  # fmt: skip
 
     def _ended(self, e: Exception) -> Stopped:
